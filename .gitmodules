@@ -1,6 +1,6 @@
 [submodule "libultraship"]
 	path = libultraship
-	url = https://github.com/kenix3/libultraship.git
+	url = https://github.com/timrburnham/libultraship.git
 [submodule "ZAPDTR"]
 	path = ZAPDTR
 	url = https://github.com/harbourmasters/ZAPDTR
@@ -9,4 +9,4 @@
 	url = https://github.com/harbourmasters/OTRExporter
 [submodule "rt64"]
 	path = rt64
-	url = https://github.com/rt64/rt64.git
+	url = https://github.com/timrburnham/rt64.git

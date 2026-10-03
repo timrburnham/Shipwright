@@ -144,6 +144,8 @@ SHIP_RT64_TEST_FRAMES=120 SHIP_RT64_CAPTURE=frame.ppm \
 
 `SHIP_RT64_TEST_FRAMES` requests shutdown after the specified number of rendered game frames. If `SHIP_RT64_CAPTURE` is set, the runtime writes the native 320×240 output as a PPM image at that frame. Run from the `build/linux-clang-rt64/soh` directory so the generated archives are found.
 
+For consecutive-frame inspection, also set `SHIP_RT64_CAPTURE_START` to the first frame to capture. With `SHIP_RT64_CAPTURE=frames`, the bounded run writes `frames.100.ppm`, `frames.101.ppm`, and so on from that frame through the limit. This option only runs during a bounded test.
+
 For reproducible input during a bounded run, `SHIP_RT64_TEST_KEY` accepts an SDL scancode name (for example `Space` for the default Start mapping or `F1` for the menu). `SHIP_RT64_TEST_KEY_FRAME` selects the rendered frame to press it, defaulting to 60; it is released six rendered frames later so game input can sample it when interpolation is enabled. For several presses, `SHIP_RT64_TEST_KEYS` accepts a comma-separated schedule such as `60:Space,240:Z`, which opens pause and then the equipment page with the default keyboard mappings. Each scheduled key is released six rendered frames later. These input options only operate when `SHIP_RT64_TEST_FRAMES` is set.
 
 #### Nix

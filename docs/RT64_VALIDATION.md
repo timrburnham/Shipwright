@@ -65,3 +65,54 @@ offscreen depth clearing, and the equipment quad loaded before framebuffer
 binding. CPU checks cover raw and shifted palette modes and framebuffer
 invalidate/flush ordering. Final logs: `rt64-render-fixes-build.log` and
 `rt64-render-fixes-ctest.log`.
+
+
+## HUD clipping and lighting stability fixes (2026-10-03)
+
+The static hearts and pause-screen A icon use native textured geometry with
+`G_TP_NONE`. RT64 simulates a hardware half-UV correction in this mode,
+while Ship expects the native UV range. The native RSP now compensates in
+floating point and keeps the original sampling bounds; signed 16-bit UV
+extremes remain intact. Modified vertex UVs use the same conversion.
+
+Directional lights can contain uninitialized padding bytes. The bridge
+previously treated a nonzero padding byte as a positional-light layout,
+which corrupted directional vectors as frame allocations were reused.
+Translation now preserves the directional view and RT64 separately decodes
+native positional records. The geometry point-lighting bit selects the
+layout when vertices are loaded, ambient lights stay ambient, and changing
+point-lighting mode refreshes the cached encoding.
+
+The full Linux/Clang build and all three tests passed. The Vulkan test
+compares matching IA8 icon quads under both perspective modes and repeats
+lighting draws with alternating nonzero directional padding bytes, checking
+identical pixels. Existing preview, point-light, fog, framebuffer, resolution,
+and MSAA checks still pass. Logs: `rt64-hud-flicker-build.log` and
+`rt64-hud-flicker-ctest.log`, under `build/linux-clang-rt64`.
+
+Isolated 60-FPS Kokiri gameplay captures from frames 100 through 120 showed
+complete hearts and stable terrain lighting. A 360-frame run with
+`SHIP_RT64_TEST_KEYS=180:Space,300:C` verified the complete A icon and
+"to Decide" text in the save prompt. Images are
+`hud-flicker-smoke/hud-final.png` and
+`hud-flicker-smoke/decide-final2.png` under the build directory. A further
+child-Link warp check exited normally. The exact crawling camera movement
+in the supplied screencast has not been replayed; the lighting regression
+covers the identified padding-driven instability.
+
+## Whole-image title logo (2026-10-03)
+
+The title screen loads its 160x160 RGBA32 logo as one image, exceeding the
+N64's 4 KiB texture memory. Canonical RGBA32 resources larger than TMEM now
+register a native image when loaded with an explicit image width. A previous
+small alias of the same resource cannot bypass that registration. Native
+images also bypass RT64's raw-TMEM overflow fallback, which otherwise samples
+the zero-filled compatibility allocation instead of the full image.
+
+A bounded 1200-frame title run on desktop Vulkan verified the complete Zelda
+logo, shield, and sword. Evidence: `title-logo-smoke/title-logo-fixed.png`
+under `build/linux-clang-rt64`. The Linux/Clang build and all three tests pass;
+the translator regression covers the small-alias-to-whole-image transition.
+The Vulkan regression also renders both halves of a 160x160 native framebuffer
+image, verifying samples beyond the 4 KiB TMEM boundary.
+Logs: `rt64-title-logo-build.log` and `rt64-title-logo-ctest.log`.

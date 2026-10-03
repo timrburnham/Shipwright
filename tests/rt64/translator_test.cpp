@@ -83,13 +83,14 @@ void TestNativeVertexPacking() {
     vertex.v.cn[2] = 0x33;
     vertex.v.cn[3] = 0x44;
 
-    Gfx commands[2]{};
-    __gSPVertex(&commands[0], &vertex, 1, 0);
-    gSPEndDisplayList(&commands[1]);
+    Gfx commands[3]{};
+    gDPSetTexturePersp(&commands[0], G_TP_PERSP);
+    __gSPVertex(&commands[1], &vertex, 1, 0);
+    gSPEndDisplayList(&commands[2]);
 
     Fast::DisplayListTranslator translator;
     const uint32_t root = translator.Translate(commands);
-    const RtCommand vertexCommand = ReadCommand(translator, root, 0);
+    const RtCommand vertexCommand = ReadCommand(translator, root, 1);
     Require((vertexCommand.w0 >> 24) == static_cast<uint8_t>(Fast::F3DEX2_G_VTX),
             "native vertex command was not retained as F3DEX2 G_VTX");
 
@@ -102,6 +103,48 @@ void TestNativeVertexPacking() {
             "RT64 vertex texture coordinates did not decode as t,s");
     Require(packed.a == 0x44 && packed.b == 0x33 && packed.g == 0x22 && packed.r == 0x11,
             "RT64 vertex color did not decode as a,b,g,r");
+}
+
+void TestTriangleUvPreservationAcrossOtherModes() {
+    const auto translateQuad = [](bool texturePerspective, bool fullOtherMode) {
+        std::array<Fast::F3DVtx, 4> vertices{};
+        vertices[0].v.tc[0] = INT16_MAX;
+        vertices[0].v.tc[1] = INT16_MIN;
+        vertices[1].v.tc[0] = 0x220;
+        vertices[1].v.tc[1] = 0x40;
+        vertices[2].v.tc[0] = INT16_MIN;
+        vertices[2].v.tc[1] = INT16_MAX;
+        vertices[3].v.tc[0] = 0x20;
+        vertices[3].v.tc[1] = 0x240;
+
+        Gfx commands[4]{};
+        if (fullOtherMode) {
+            gDPSetOtherMode(&commands[0], texturePerspective ? G_TP_PERSP : G_TP_NONE, 0);
+        } else {
+            gDPSetTexturePersp(&commands[0], texturePerspective ? G_TP_PERSP : G_TP_NONE);
+        }
+        __gSPVertex(&commands[1], vertices.data(), vertices.size(), 0);
+        gSP1Quadrangle(&commands[2], 0, 2, 3, 1, 0);
+        gSPEndDisplayList(&commands[3]);
+
+        Fast::DisplayListTranslator translator;
+        const uint32_t root = translator.Translate(commands);
+        const RtCommand vertexCommand = ReadCommand(translator, root, 1);
+        const auto bytes = ReadBytes(translator, vertexCommand.w1, sizeof(vertices));
+        std::array<RtVertex, 4> packed{};
+        std::memcpy(packed.data(), bytes.data(), bytes.size());
+        return packed;
+    };
+
+    for (bool fullOtherMode : { false, true }) {
+        for (bool texturePerspective : { false, true }) {
+            const auto vertices = translateQuad(texturePerspective, fullOtherMode);
+            Require(vertices[0].s == INT16_MAX && vertices[0].t == INT16_MIN &&
+                        vertices[2].s == INT16_MIN && vertices[2].t == INT16_MAX,
+                    fullOtherMode ? "full other-mode command changed native triangle UVs"
+                                  : "partial other-mode command changed native triangle UVs");
+        }
+    }
 }
 
 void TestPointLightPacking() {
@@ -117,24 +160,24 @@ void TestPointLightPacking() {
     const auto& rdram = translator.GetRdram();
     const std::array<uint8_t, 16> expected = {
         0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
-        0x44, 0x33, 0x22, 0x11, 0xAA, 0x99, 0x66, 0x55
+        0x33, 0x44, 0x11, 0x22, 0xAA, 0x99, 0x55, 0x66
     };
     Require(std::memcmp(rdram.data() + address, expected.data(), expected.size()) == 0,
-            "point-light words did not map to RT64 PosLight field order");
+            "native point-light words were not preserved for deferred RSP decoding");
 }
 
 void TestDirectionalLightPacking() {
     Fast::DisplayListTranslator translator;
     const std::array<uint8_t, 16> native = {
-        0x11, 0x22, 0x33, 0x00, 0x11, 0x22, 0x33, 0x00,
-        0x44, 0x55, 0x66, 0x00, 0, 0, 0, 0
+        0x11, 0x22, 0x33, 0x7F, 0x11, 0x22, 0x33, 0x55,
+        0x44, 0x55, 0x66, 0x31, 0, 0, 0, 0
     };
     const uint32_t address = Fast::DisplayListTranslatorTestAccess::CopyMovemem(
         translator, native.data(), native.size(), static_cast<uint8_t>(Fast::F3DEX2_G_MV_LIGHT));
     const auto& rdram = translator.GetRdram();
     const std::array<uint8_t, 16> expected = {
-        0x00, 0x33, 0x22, 0x11, 0x00, 0x33, 0x22, 0x11,
-        0x00, 0x66, 0x55, 0x44, 0, 0, 0, 0
+        0x7F, 0x33, 0x22, 0x11, 0x55, 0x33, 0x22, 0x11,
+        0x31, 0x66, 0x55, 0x44, 0, 0, 0, 0
     };
     Require(std::memcmp(rdram.data() + address, expected.data(), expected.size()) == 0,
             "directional light words did not map to RT64 DirLight field order");
@@ -708,6 +751,40 @@ void TestTexturePatchUsesResourceDimensions() {
             "resource dimensions and patch replacement were not preserved for a width-one G_SETTIMG alias");
 }
 
+void TestCanonicalRgba32NativeTextureRegistration() {
+    constexpr uint16_t width = 160;
+    constexpr uint16_t height = 160;
+    constexpr size_t rgbaBytes = static_cast<size_t>(width) * height * 4;
+    auto texture = std::make_shared<Fast::Texture>();
+    texture->Type = Fast::TextureType::RGBA32bpp;
+    texture->Width = width;
+    texture->Height = height;
+    texture->Flags = 0;
+    texture->ImageDataSize = rgbaBytes;
+    texture->ImageData = new uint8_t[rgbaBytes];
+    for (size_t i = 0; i < rgbaBytes; ++i) {
+        texture->ImageData[i] = static_cast<uint8_t>(i * 17u);
+    }
+
+    Fast::DisplayListTranslator translator;
+    Fast::DisplayListTranslatorTestAccess::CopyTextureResource(
+        translator, texture, rgbaBytes, 1, 32, G_IM_FMT_RGBA, G_IM_SIZ_32b, nullptr);
+    Require(translator.GetNativeTextures().empty(),
+            "width-one block-load aliases must keep the normal TMEM path");
+    const uint32_t placeholder = Fast::DisplayListTranslatorTestAccess::CopyTextureResource(
+        translator, texture, 4096, width, 32, G_IM_FMT_RGBA, G_IM_SIZ_32b, nullptr);
+    const auto& nativeTextures = translator.GetNativeTextures();
+    Require(nativeTextures.size() == 1 && nativeTextures[0].address == placeholder &&
+                nativeTextures[0].rgba == texture->ImageData && nativeTextures[0].byteCount == rgbaBytes &&
+                nativeTextures[0].width == width && nativeTextures[0].height == height &&
+                nativeTextures[0].nativeWidth == width && nativeTextures[0].nativeHeight == height,
+            "unflagged canonical RGBA32 image did not register its full native texture dimensions");
+    Require(Fast::DisplayListTranslatorTestAccess::CopyTextureResource(
+                translator, texture, 4096, width, 32, G_IM_FMT_RGBA, G_IM_SIZ_32b, nullptr) == placeholder &&
+                translator.GetNativeTextures().size() == 1,
+            "repeated whole-image loads must reuse the registered native texture");
+}
+
 void TestLowAddressNativeStaticVertex() {
     const uintptr_t nativeAddress = reinterpret_cast<uintptr_t>(&nativeStaticVertex);
     Require(nativeAddress <= UINT32_MAX, "translator test static vertex must live below 4 GiB (non-PIE target)");
@@ -739,6 +816,7 @@ int main() {
             test();
         };
         run("native vertex packing", TestNativeVertexPacking);
+        run("triangle UV preservation across other modes", TestTriangleUvPreservationAcrossOtherModes);
         run("point-light packing", TestPointLightPacking);
         run("directional light packing", TestDirectionalLightPacking);
         run("texture LUT partial other mode", TestTextureLutPartialOtherModeNormalization);
@@ -757,6 +835,7 @@ int main() {
         run("interpolated tile size", TestInterpolatedTileSizeSelectionAndQuantization);
         run("interpolated segments", TestInterpolatedSegments);
         run("resource dimensions in texture patch", TestTexturePatchUsesResourceDimensions);
+        run("canonical RGBA32 native texture registration", TestCanonicalRgba32NativeTextureRegistration);
     } catch (const std::exception& exception) {
         std::cerr << "RT64 translator test failed: " << exception.what() << '\n';
         return 1;

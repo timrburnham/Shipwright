@@ -97,6 +97,60 @@ bool VerifyFramebufferCopyReadback(Fast::Rt64Renderer& renderer) {
            renderer.GetNativeColor(160, 60) == 0xF801 && renderer.GetNativeColor(160, 180) == 0x003F;
 }
 
+bool VerifyOversizedNativeTextureUpload(Fast::Rt64Renderer& renderer) {
+    constexpr uint32_t width = 160;
+    constexpr uint32_t height = 160;
+    Fast::GfxRenderingAPI* guiApi = renderer.GetGuiApi();
+    // Reuse the first framebuffer allocated by VerifyFramebufferCopyReadback
+    // so this smoke case stays within the runtime's five native-FB slots.
+    constexpr int sourceId = 1;
+    guiApi->UpdateFramebufferParameters(sourceId, width, height, 1, false, true, true, false);
+
+    Gfx commands[32]{};
+    Gfx* cursor = commands;
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(cursor++, 0x00010001u);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+
+    // The preview source is 160x160 RGBA16 (50 KiB), far beyond the RDP's
+    // 4 KiB TMEM. A blue lower half proves RT64 samples data beyond the first
+    // 4 KiB when the framebuffer is registered as a native texture.
+    gsSPSetFB(cursor++, sourceId);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(cursor++, (0xF801u << 16) | 0xF801u);
+    gDPFillRectangle(cursor++, 0, 0, width - 1, (height / 2) - 1);
+    gDPSetFillColor(cursor++, (0x003Fu << 16) | 0x003Fu);
+    gDPFillRectangle(cursor++, 0, height / 2, width - 1, height - 1);
+    gDPFullSync(cursor++);
+    gsSPResetFB(cursor++);
+
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetCycleType(cursor++, G_CYC_1CYCLE);
+    gDPSetRenderMode(cursor++, G_RM_AA_TEX_EDGE, G_RM_AA_TEX_EDGE2);
+    gDPSetOtherMode(cursor++, G_AD_DISABLE | G_CD_DISABLE | G_TF_POINT | G_TT_NONE |
+                       G_TP_NONE | G_CYC_1CYCLE,
+                       G_AC_NONE | G_ZS_PIXEL | G_RM_AA_TEX_EDGE | G_RM_AA_TEX_EDGE2);
+    gDPSetCombineMode(cursor++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gDPSetTile(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, width / 4, 0, G_TX_RENDERTILE, 0,
+               G_TX_CLAMP, 0, 0, G_TX_CLAMP, 0, 0);
+    gDPSetTileSize(cursor++, G_TX_RENDERTILE, 0, 0, (width - 1) << 2, (height - 1) << 2);
+    gSPTexture(cursor++, 0xffff, 0xffff, 0, G_TX_RENDERTILE, G_ON);
+    gDPSetTextureImageFB(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, width,
+                         reinterpret_cast<void*>(static_cast<uintptr_t>(sourceId)));
+    gSPTextureRectangle(cursor++, 80 << 2, 40 << 2, 240 << 2, 200 << 2, G_TX_RENDERTILE,
+                        0, 0, 1 << 10, 1 << 10);
+    gDPFullSync(cursor++);
+    gSPEndDisplayList(cursor);
+
+    renderer.Run(commands, {});
+    renderer.Present();
+    return renderer.GetNativeColor(160, 80) == 0xF801 && renderer.GetNativeColor(160, 160) == 0x003F;
+}
+
 bool VerifyPausePreviewFramebuffer(Fast::Rt64Renderer& renderer) {
     Fast::GfxRenderingAPI* guiApi = renderer.GetGuiApi();
     const int previewId = guiApi->CreateFramebuffer();
@@ -188,6 +242,11 @@ bool VerifyPausePreviewFramebuffer(Fast::Rt64Renderer& renderer) {
         vertex.v.cn[3] = 255;
     }
     Lights1 directionalLights = gdSPDefLights1(20, 40, 60, 180, 120, 60, 0, 0, 127);
+    // Real game Light_t records may carry arbitrary kc/kl bytes here. These
+    // fields overlap the PointLight_t view but are padding in a directional
+    // light, so they must not change how the light is decoded.
+    directionalLights.l[0].p.unk3 = 0x6b;
+    directionalLights.l[0].p.unk7 = 0xa5;
     Lights1 pointLights{};
     pointLights.a.l.col[0] = pointLights.a.l.colc[0] = 8;
     pointLights.a.l.col[1] = pointLights.a.l.colc[1] = 16;
@@ -290,6 +349,33 @@ bool VerifyPausePreviewFramebuffer(Fast::Rt64Renderer& renderer) {
 
     renderer.Run(commands, {});
     renderer.Present();
+    const uint16_t referenceDirectional = renderer.GetNativeColor(126, 120);
+    const auto directionalMatchesExpected = [](uint16_t pixel) {
+        const uint32_t red = (pixel >> 11) & 0x1f;
+        const uint32_t green = (pixel >> 6) & 0x1f;
+        const uint32_t blue = (pixel >> 1) & 0x1f;
+        const auto closeTo = [](uint32_t actual, uint32_t expected) {
+            return std::abs(static_cast<int>(actual) - static_cast<int>(expected)) <= 2;
+        };
+        return closeTo(red, 24) && closeTo(green, 19) && closeTo(blue, 14);
+    };
+    if (!directionalMatchesExpected(referenceDirectional)) {
+        return false;
+    }
+    // Re-run the same frame with alternating nonzero values in the native
+    // directional-light padding. Neither byte is a point-light discriminator
+    // for a GBI that has not enabled RT64 point lighting.
+    constexpr std::array<std::array<uint8_t, 2>, 2> lightPadding = {{{0x11, 0x73}, {0xd1, 0x2b}}};
+    for (const auto& padding : lightPadding) {
+        directionalLights.l[0].p.unk3 = padding[0];
+        directionalLights.l[0].p.unk7 = padding[1];
+        renderer.Run(commands, {});
+        renderer.Present();
+        const uint16_t repeatedDirectional = renderer.GetNativeColor(126, 120);
+        if (!directionalMatchesExpected(repeatedDirectional) || repeatedDirectional != referenceDirectional) {
+            return false;
+        }
+    }
     const uint16_t directional = renderer.GetNativeColor(126, 120);
     const uint16_t point = renderer.GetNativeColor(188, 120);
     const uint16_t primitive = renderer.GetNativeColor(160, 180);
@@ -317,6 +403,112 @@ bool VerifyPausePreviewFramebuffer(Fast::Rt64Renderer& renderer) {
            pointBlue > pointGreen + 4 && primitiveRed >= 29 && primitiveGreen <= 1 && primitiveBlue <= 1 &&
            fogGreen >= 29 && fogRed <= 1 && fogBlue <= 1 && boundGreen >= 29 && boundRed <= 1 && boundBlue <= 1 &&
            renderer.GetNativeColor(98, 10) == 0x003F;
+}
+
+bool VerifyHudTexturePerspectiveAndAlpha(Fast::Rt64Renderer& renderer) {
+    // The HUD commonly draws IA textures with vertex UVs under G_TP_NONE.
+    // RT64's texture sampler applies a half-UV correction in that mode, so
+    // the native RSP texture coordinates must compensate for it. Compare two
+    // identical quads rendered side by side, one with each perspective mode.
+    std::array<uint8_t, 16 * 16> icon{};
+    for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+            const int dx = std::abs(x - 7);
+            const int dy = std::abs(y - 7);
+            const int radius = std::max(dx, dy);
+            const uint8_t alpha = radius <= 3 ? 0xF : (radius == 4 ? 0x8 : 0x0);
+            // IA8 packs intensity in the upper nibble and alpha in the lower.
+            icon[static_cast<size_t>(y * 16 + x)] = static_cast<uint8_t>((0xF << 4) | alpha);
+        }
+    }
+
+    MtxS identity{};
+    for (size_t diagonal = 0; diagonal < 4; ++diagonal) {
+        identity.intPart[diagonal][diagonal ^ 1u] = 1;
+    }
+    MtxS projection{};
+    projection.fracPart[0][1] = 512; // exact 1 / 128
+    projection.fracPart[1][0] = 512; // exact 1 / 128
+    projection.intPart[2][3] = 1;
+    projection.intPart[3][2] = 1;
+    Vp viewport{};
+    viewport.vp.vscale[0] = 512;
+    viewport.vp.vtrans[0] = 640;
+    viewport.vp.vscale[1] = 512;
+    viewport.vp.vtrans[1] = 480;
+    viewport.vp.vscale[2] = viewport.vp.vtrans[2] = 511;
+
+    Fast::F3DVtx vertices[8]{};
+    const int16_t centers[2] = {-48, 48};
+    for (size_t quad = 0; quad < 2; ++quad) {
+        const int16_t left = static_cast<int16_t>(centers[quad] - 16);
+        const int16_t right = static_cast<int16_t>(centers[quad] + 16);
+        const int16_t positions[4][2] = {{left, 16}, {right, 16}, {left, -16}, {right, -16}};
+        for (size_t i = 0; i < 4; ++i) {
+            auto& vertex = vertices[quad * 4 + i];
+            vertex.v.ob[0] = positions[i][0];
+            vertex.v.ob[1] = positions[i][1];
+            vertex.v.tc[0] = (i == 1 || i == 3) ? 16 << 5 : 0;
+            vertex.v.tc[1] = i >= 2 ? 16 << 5 : 0;
+            vertex.v.cn[3] = 255;
+        }
+    }
+
+    Gfx commands[48]{};
+    Gfx* cursor = commands;
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(cursor++, (0x003Fu << 16) | 0x003Fu);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    gDPPipeSync(cursor++);
+    gDPSetOtherMode(cursor++, G_AD_DISABLE | G_CD_DISABLE | G_TF_POINT | G_TT_NONE |
+                       G_TP_PERSP | G_CYC_1CYCLE,
+                       G_AC_NONE | G_ZS_PIXEL | G_RM_AA_TEX_EDGE | G_RM_AA_TEX_EDGE2);
+    gDPSetCombineMode(cursor++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+    gDPSetPrimColor(cursor++, 0, 0, 255, 255, 255, 255);
+    gSPLoadGeometryMode(cursor++, G_SHADING_SMOOTH);
+    gSPViewport(cursor++, &viewport);
+    gSPMatrix(cursor++, &projection, G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPMatrix(cursor++, &identity, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    gDPLoadTextureBlock(cursor++, icon.data(), G_IM_FMT_IA, G_IM_SIZ_8b, 16, 16, 0,
+                        G_TX_CLAMP, G_TX_CLAMP, 0, 0, 0, 0);
+    gSPTexture(cursor++, 0xffff, 0xffff, 0, G_TX_RENDERTILE, G_ON);
+    gDPSetTexturePersp(cursor++, G_TP_NONE);
+    __gSPVertex(cursor++, vertices, 4, 0);
+    gSP1Quadrangle(cursor++, 0, 2, 3, 1, 0);
+    gDPSetTexturePersp(cursor++, G_TP_PERSP);
+    __gSPVertex(cursor++, &vertices[4], 4, 0);
+    gSP1Quadrangle(cursor++, 0, 2, 3, 1, 0);
+    gDPFullSync(cursor++);
+    gSPEndDisplayList(cursor);
+
+    renderer.Run(commands, {});
+    renderer.Present();
+
+    // Compare every native pixel in corresponding 64x64 regions, including
+    // transparent pixels and antialiased alpha edges. The two quads differ
+    // only by the texture-perspective mode.
+    for (uint32_t y = 88; y < 152; ++y) {
+        for (uint32_t x = 80; x < 144; ++x) {
+            if (renderer.GetNativeColor(x, y) != renderer.GetNativeColor(x + 96, y)) {
+                std::cerr << "HUD mismatch " << x << "," << y << " none=" << renderer.GetNativeColor(x,y) << " persp=" << renderer.GetNativeColor(x+96,y) << "\n";
+                return false;
+            }
+        }
+    }
+    uint32_t coloredPixels = 0;
+    for (uint32_t y = 88; y < 152; ++y) {
+        for (uint32_t x = 80; x < 144; ++x) {
+            const uint16_t pixel = renderer.GetNativeColor(x, y);
+            if (((pixel >> 11) & 0x1f) > 20 && ((pixel >> 6) & 0x1f) > 20 && ((pixel >> 1) & 0x1f) > 20) {
+                ++coloredPixels;
+            }
+        }
+    }
+    if (coloredPixels < 40 || coloredPixels > 600) std::cerr << "HUD coverage " << coloredPixels << "\n";
+    return coloredPixels >= 40 && coloredPixels <= 600;
 }
 
 bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer) {
@@ -480,6 +672,12 @@ int main() {
             std::cerr << "RT64 framebuffer create/copy/read did not preserve the synthetic RGBA16 pixel" << '\n';
             return 1;
         }
+        if (!VerifyOversizedNativeTextureUpload(renderer)) {
+            std::cerr << "RT64 oversized 160x160 native texture upload did not preserve pixels past the first 4 KiB: top=0x"
+                      << std::hex << renderer.GetNativeColor(160, 80) << " bottom=0x"
+                      << renderer.GetNativeColor(160, 160) << std::dec << '\n';
+            return 1;
+        }
         if (!VerifyNativeTriangle(renderer)) {
             std::cerr << "RT64 native fixed-point matrix/vertex triangle readback failed: inside=0x"
                       << std::hex << renderer.GetNativeColor(160, 120) << " outside=0x"
@@ -523,6 +721,12 @@ int main() {
                       << " point=0x" << renderer.GetNativeColor(188, 120) << " fog=0x"
                       << renderer.GetNativeColor(160, 120) << " primitive=0x" << renderer.GetNativeColor(160, 180)
                       << " direct-bind=0x" << renderer.GetNativeColor(246, 26) << std::dec << '\n';
+            return 1;
+        }
+        if (!VerifyHudTexturePerspectiveAndAlpha(renderer)) {
+            std::cerr << "RT64 HUD IA8 texture-perspective/alpha-edge regression failed: none=0x"
+                      << std::hex << renderer.GetNativeColor(112, 120) << " persp=0x"
+                      << renderer.GetNativeColor(208, 120) << std::dec << '\n';
             return 1;
         }
         // Recreating the shader cache must remain safe while its asynchronous
