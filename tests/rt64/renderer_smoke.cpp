@@ -17,8 +17,34 @@
 #include "imgui.h"
 #include <SDL.h>
 #include <cmath>
+#include "common/rt64_math.h"
 
 namespace {
+bool VerifyAxisAlignedProjection() {
+    // A combined view/projection with zero camera yaw used to yield 0/0
+    // during decomposition, corrupting geometry when widescreen is enabled.
+    hlslpp::float4x4 projection(0.0f);
+    projection[0][0] = 1.0f;
+    projection[1][1] = 1.5f;
+    projection[2][2] = -1.01f;
+    projection[2][3] = -1.0f;
+    projection[3][2] = -2.01f;
+    for (float yaw : {0.0f, 0.000001f, 1.5707963f}) {
+        hlslpp::float4x4 view = hlslpp::float4x4::identity();
+        const auto rotation = RT64::matrixRotationY(yaw);
+        for (uint32_t r = 0; r < 3; ++r) for (uint32_t c = 0; c < 3; ++c) view[r][c] = rotation[r][c];
+        view[3][2] = -10.0f;
+        const auto combined = hlslpp::mul(view, projection);
+        hlslpp::float4x4 decodedView, decodedProjection;
+        RT64::matrixDecomposeViewProj(combined, decodedView, decodedProjection);
+        const auto reconstructed = hlslpp::mul(decodedView, decodedProjection);
+        if (RT64::matrixIsNaN(reconstructed)) return false;
+        for (uint32_t r = 0; r < 4; ++r) for (uint32_t c = 0; c < 4; ++c) {
+            if (std::abs(float(reconstructed[r][c]) - float(combined[r][c])) > 0.0001f) return false;
+        }
+    }
+    return true;
+}
 bool HasDisplay() {
 #if defined(_WIN32) || defined(__APPLE__)
     return true;
@@ -97,6 +123,39 @@ bool VerifyFramebufferCopyReadback(Fast::Rt64Renderer& renderer) {
            renderer.GetNativeColor(160, 60) == 0xF801 && renderer.GetNativeColor(160, 180) == 0x003F;
 }
 
+bool VerifyWideFramebufferCopy(Fast::Rt64Renderer& renderer) {
+    // A native readback contains the center 320 pixels. Stretching that slice
+    // to the wide destination moves the stripe boundaries; a full GPU copy
+    // keeps them at their original world-screen coordinates.
+    Gfx commands[40]{};
+    Gfx* cursor = commands;
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetFillColor(cursor++, 0x003F003Fu);
+    gDPFillWideRectangle(cursor++, -53, 0, 372, 239);
+    gDPSetFillColor(cursor++, 0xFFFFFFFFu);
+    gDPFillWideRectangle(cursor++, 80, 0, 239, 239);
+    gDPCopyFB(cursor++, 2, 0, false, nullptr);
+    gDPSetFillColor(cursor++, 0x00010001u);
+    gDPFillWideRectangle(cursor++, -53, 0, 372, 239);
+    gDPSetCycleType(cursor++, G_CYC_1CYCLE);
+    gDPSetRenderMode(cursor++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
+    gDPSetTextureFilter(cursor++, G_TF_POINT);
+    gDPSetCombineMode(cursor++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gDPSetTextureImageFB(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320,
+                         reinterpret_cast<void*>(static_cast<uintptr_t>(2)));
+    gDPImageRectangle(cursor++, -53 * 4, 0, 0, 0, 373 * 4, 240 * 4, 320, 240,
+                      G_TX_RENDERTILE, 320, 240);
+    gDPFullSync(cursor++);
+    gSPEndDisplayList(cursor);
+    renderer.Run(commands, {});
+    renderer.Present();
+    return renderer.GetNativeColor(70, 120) == 0x003F &&
+           renderer.GetNativeColor(90, 120) == 0xFFFF &&
+           renderer.GetNativeColor(250, 120) == 0x003F;
+}
+
 bool VerifyOversizedNativeTextureUpload(Fast::Rt64Renderer& renderer) {
     constexpr uint32_t width = 160;
     constexpr uint32_t height = 160;
@@ -149,6 +208,60 @@ bool VerifyOversizedNativeTextureUpload(Fast::Rt64Renderer& renderer) {
     renderer.Run(commands, {});
     renderer.Present();
     return renderer.GetNativeColor(160, 80) == 0xF801 && renderer.GetNativeColor(160, 160) == 0x003F;
+}
+
+bool VerifyUnalignedTextureBlockDxt(Fast::Rt64Renderer& renderer) {
+    constexpr uint32_t width = 46;
+    constexpr uint32_t paddedWidth = 48;
+    constexpr uint32_t height = 16;
+    std::array<uint8_t, paddedWidth * height> ia8{};
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < paddedWidth; ++x) {
+            // A distinct intensity on each padded source row makes a bad DXT
+            // row stride show up as repeated or out-of-order horizontal bands.
+            ia8[y * paddedWidth + x] = static_cast<uint8_t>(((y & 0xfu) << 4) | 0xfu);
+        }
+    }
+
+    Gfx commands[24]{};
+    Gfx* cursor = commands;
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(cursor++, 0x00010001u);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    gDPPipeSync(cursor++);
+    gDPSetOtherMode(cursor++, G_AD_DISABLE | G_CD_DISABLE | G_TF_POINT | G_TT_NONE |
+                       G_TP_NONE | G_CYC_1CYCLE,
+                       G_AC_NONE | G_ZS_PIXEL | G_RM_AA_TEX_EDGE | G_RM_AA_TEX_EDGE2);
+    gDPSetCombineMode(cursor++, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+    gDPSetPrimColor(cursor++, 0, 0, 255, 255, 255, 255);
+    gDPLoadTextureBlock(cursor++, ia8.data(), G_IM_FMT_IA, G_IM_SIZ_8b, width, height, 0,
+                        G_TX_WRAP, G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+    gSPTexture(cursor++, 0xffff, 0xffff, 0, G_TX_RENDERTILE, G_ON);
+    gSPWideTextureRectangle(cursor++, 60 << 2, 60 << 2, (60 + width) << 2, (60 + height) << 2,
+                            G_TX_RENDERTILE, 0, 0, 1 << 10, 1 << 10);
+    gDPFullSync(cursor++);
+    gSPEndDisplayList(cursor);
+
+    renderer.Run(commands, {});
+    renderer.Present();
+
+    uint16_t previous = 0;
+    uint32_t distinctRows = 0;
+    for (uint32_t y = 2; y < height - 1; ++y) {
+        const uint16_t pixel = renderer.GetNativeColor(80, 60 + y);
+        const uint16_t intensity = (pixel >> 11) & 0x1fu;
+        if (y == 2 || intensity != previous) {
+            ++distinctRows;
+        }
+        if (y > 2 && intensity < previous) {
+            return false;
+        }
+        previous = intensity;
+    }
+    return distinctRows >= 12;
 }
 
 bool VerifyPausePreviewFramebuffer(Fast::Rt64Renderer& renderer) {
@@ -511,7 +624,7 @@ bool VerifyHudTexturePerspectiveAndAlpha(Fast::Rt64Renderer& renderer) {
     return coloredPixels >= 40 && coloredPixels <= 600;
 }
 
-bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer) {
+bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer, bool perspective = false) {
     MtxS identity{};
     for (size_t diagonal = 0; diagonal < 4; ++diagonal) {
         // Native guMtxF2L layout packs adjacent matrix columns into one word;
@@ -523,6 +636,15 @@ bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer) {
     projection.fracPart[1][0] = 655; // guMtxF2L(0.01f), logical column 1
     projection.intPart[2][3] = 1;
     projection.intPart[3][2] = 1;
+
+    if (perspective) {
+        projection = {};
+        projection.intPart[0][1] = 1;
+        projection.intPart[1][0] = 1;
+        projection.intPart[2][3] = -1;
+        projection.intPart[2][2] = -1;
+        projection.intPart[3][2] = 200;
+    }
 
     Vp viewport{};
     viewport.vp.vscale[0] = 640;
@@ -557,7 +679,11 @@ bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer) {
     gDPSetCycleType(cursor++, G_CYC_FILL);
     gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
     gDPSetFillColor(cursor++, (0xfffcU << 16) | 0xfffcU);
-    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    if (perspective) {
+        gDPFillWideRectangle(cursor++, -80, 0, 399, 239);
+    } else {
+        gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    }
     gDPFullSync(cursor++);
     gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
     gDPSetDepthImage(cursor++, reinterpret_cast<void*>(static_cast<uintptr_t>(Fast::DisplayListTranslator::DepthAddress)));
@@ -565,7 +691,11 @@ bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer) {
     gDPSetCycleType(cursor++, G_CYC_FILL);
     gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
     gDPSetFillColor(cursor++, (0x003Fu << 16) | 0x003Fu);
-    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    if (perspective) {
+        gDPFillWideRectangle(cursor++, -80, 0, 399, 239);
+    } else {
+        gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    }
     gDPPipeSync(cursor++);
     gDPSetCycleType(cursor++, G_CYC_1CYCLE);
     gDPSetRenderMode(cursor++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2);
@@ -587,6 +717,31 @@ bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer) {
     const uint16_t outside = renderer.GetNativeColor(20, 20);
     const uint16_t depth = renderer.GetDepth(160, 120);
     return inside == 0xF801 && outside == 0x003F && std::abs(static_cast<int>(depth) - 32766) < 256;
+}
+
+bool VerifyWideEdgeRectangle(Fast::Rt64Renderer& renderer) {
+    Gfx commands[16]{};
+    Gfx* cursor = commands;
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(cursor++, (0x003Fu << 16) | 0x003Fu);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    gDPPipeSync(cursor++);
+    gDPSetCycleType(cursor++, G_CYC_1CYCLE);
+    gDPSetRenderMode(cursor++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
+    gDPSetCombineMode(cursor++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+    gDPSetPrimColor(cursor++, 0, 0, 255, 255, 255, 255);
+    // A negative start must preserve the visible part within the native
+    // readback image rather than wrap around the standard RDP coordinate field.
+    gDPFillWideRectangle(cursor++, -20, 20, 20, 40);
+    gDPFullSync(cursor++);
+    gSPEndDisplayList(cursor);
+
+    renderer.Run(commands, {});
+    renderer.Present();
+    return renderer.GetNativeColor(8, 30) == 0xFFFF && renderer.GetNativeColor(160, 30) == 0x003F;
 }
 
 std::string FindNativeRedBounds(Fast::Rt64Renderer& renderer) {
@@ -617,6 +772,10 @@ std::string FindNativeRedBounds(Fast::Rt64Renderer& renderer) {
 } // namespace
 
 int main() {
+    if (!VerifyAxisAlignedProjection()) {
+        std::cerr << "RT64 axis-aligned view/projection decomposition failed\n";
+        return 1;
+    }
     if (!HasDisplay()) {
         std::cout << "SKIP: no desktop display is available for the RT64 Vulkan smoke test\n";
         return 77;
@@ -729,6 +888,24 @@ int main() {
                       << renderer.GetNativeColor(208, 120) << std::dec << '\n';
             return 1;
         }
+        renderer.SetRenderSize(426, 240);
+        if (!VerifyNativeTriangle(renderer) || !VerifyNativeTriangle(renderer, true)) {
+            std::cerr << "RT64 widescreen native triangle failed center=" << renderer.GetNativeColor(160, 120) << '\n';
+            return 1;
+        }
+        if (!VerifyWideEdgeRectangle(renderer)) {
+            std::cerr << "RT64 widescreen native wide rectangle missed the left edge or painted outside its bounds: edge=0x"
+                      << std::hex << renderer.GetNativeColor(8, 30) << " center=0x"
+                      << renderer.GetNativeColor(160, 30) << std::dec << '\n';
+            return 1;
+        }
+        if (!VerifyWideFramebufferCopy(renderer)) {
+            std::cerr << "RT64 widescreen framebuffer copy changed image proportions: " << std::hex
+                      << renderer.GetNativeColor(70, 120) << ' ' << renderer.GetNativeColor(90, 120)
+                      << ' ' << renderer.GetNativeColor(250, 120) << std::dec << '\n';
+            return 1;
+        }
+        renderer.SetRenderSize(640, 480);
         // Recreating the shader cache must remain safe while its asynchronous
         // workers are starting or finishing an optimized shader compilation.
         for (int change = 0; change < 4; ++change) {

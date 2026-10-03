@@ -116,3 +116,149 @@ the translator regression covers the small-alias-to-whole-image transition.
 The Vulkan regression also renders both halves of a 160x160 native framebuffer
 image, verifying samples beyond the 4 KiB TMEM boundary.
 Logs: `rt64-title-logo-build.log` and `rt64-title-logo-ctest.log`.
+
+## SoH graphics settings and C-button symbols (2026-10-03)
+
+RT64 now receives the GPU dimensions and presentation rectangle computed by
+SoH's existing graphics settings. Aspect ratio Off fills the game window;
+forced ratios, the internal resolution multiplier, fixed vertical resolution,
+and integer scaling use the same calculations as the Fast3D path. Native
+framebuffer storage and readback remain 320x240 for game effects and pause
+backgrounds, independently of the GPU resolution.
+
+Widescreen rectangles retain signed coordinates rather than wrapping through
+12-bit RDP fields. Framebuffer clears are clipped to Vulkan attachment bounds,
+and native HUD rectangle scissors preserve the full widescreen output. Negative
+pause-background image rectangles are also preserved. Projection decomposition
+now handles an axis-aligned camera without division by a zero axis component.
+
+The 46x16 IA8 C-button symbols use a rounded six-word render tile line but the
+legacy LOADBLOCK macro supplies a five-word DXT. The native translator corrects
+DXT for recognized texture-block sequences using the render tile stride.
+Manual texture loads retain their explicit DXT.
+
+The Linux/Clang build and all three RT64 tests pass. New regressions cover the
+unaligned IA8 stride, signed wide rectangles, negative image rectangles,
+widescreen depth clears/HUD scissors, and axis-aligned projection decomposition.
+Desktop Vulkan runs verified aspect Off, forced 4:3, fixed 240p and 480p,
+window resolution at 100%, and manual 1x integer scaling. The pause screen
+opens normally in widescreen and the three C symbols before "to Equip" render
+correctly. Evidence under `build/linux-clang-rt64`:
+
+- `graphics-off/equip-final-window.png`
+- `graphics-43/validated-window.png`
+- `graphics-wide480/validated-window.png`
+- `graphics-window100/validated-final-window.png`
+- `graphics-integer/validated-final-window.png`
+
+Build/test logs: `rt64-graphics-settings-build.log` and
+`rt64-graphics-settings-ctest.log`. This validation does not establish support
+for every other graphics control, such as VSync or match-refresh pacing.
+
+## Pause snapshots and prerendered scenes (2026-10-03)
+
+Framebuffer copies used for pause backgrounds now retain the display
+workload's complete GPU image, including widescreen framing and rendering
+resolution. The native 320x240 RDRAM copy remains available for game CPU
+readbacks. Native image rectangles bind that complete image directly rather
+than rebuilding it from TMEM-sized strips. A GPU stripe regression checks that
+copying and redrawing a widescreen framebuffer leaves its horizontal boundaries
+in place; stretching the native center slice fails this check.
+
+Rooms with image meshes and panoramic background skyboxes automatically use a
+4:3 render and presentation aspect. This includes child-era Market and the
+prerendered interiors, while ordinary 3D rooms keep the user's aspect setting.
+The rule also applies with advanced resolution settings disabled or aspect
+correction otherwise ignored. It does not change saved graphics preferences.
+
+The Linux/Clang build and all three RT64 tests pass. Desktop Vulkan runs
+verified full-resolution widescreen pause imagery in Kokiri Forest and automatic
+pillarboxing in child-era Market. Evidence under `build/linux-clang-rt64`:
+`pause-background/validated-gameplay.png`,
+`pause-background/validated-pause.png`, and
+`market-background/child-fixed-gameplay.png`.
+Logs: `rt64-background-build.log` and `rt64-background-ctest.log`.
+
+The initial implementation added image-to-buffer copy support in the nested
+Plume submodule. That temporary modification has since been reverted; see
+"Pause capture with unmodified Plume" below. No Plume fork or patch is required.
+
+## Frozen pause-background stability (2026-10-03)
+
+The supplied `Screencast_20261003_185221.webm` shows small temporal RGB
+changes in the frozen scene. `FB_DrawFromFramebuffer` enabled `G_CD_NOISE`
+on every redraw, causing RT64 to add fresh post-blend dither noise to the
+already captured image. RT64 pause-background draws now disable color and
+alpha dithering; other framebuffer effects retain their existing modes.
+
+A bounded desktop Vulkan pause run captured four frames one second apart.
+The sampled ground and central background regions were pixel-identical across
+all four frames. A top-wall region differed by at most one channel value,
+with a mean temporal spread below 0.004. Menu animations remain active.
+Evidence: `pause-background/stable-1.png` through `stable-4.png` under
+`build/linux-clang-rt64`. Build and test logs:
+`rt64-pause-stability-build.log`, `rt64-pause-stability-ctest.log`.
+
+## Action-button interpolation isolation (2026-10-03)
+
+The A button and its label are transformed 3D quads. Their matrix operations
+previously lived in the root frame-interpolation recording alongside unrelated
+draws, making their old/new operation matching depend on drawing order. Each
+now has a stable named interpolation child, preserving the intended label-flip
+animation while separating its history from world rendering.
+
+The Linux/Clang build and all three RT64 tests pass. A 60 FPS child-era Hyrule
+Field run completed normally and captured 63 consecutive frames under
+`action-button/button-fixed.*.ppm`. The user's violent shaking has not been
+reproduced in this stationary fixture, so this addresses the identified
+interpolation-history risk without establishing that it was the sole cause of
+the reported behavior. Logs: `rt64-action-button-build.log` and
+`rt64-action-button-ctest.log` under `build/linux-clang-rt64`.
+
+## Action-button fixed-point quantization (2026-10-03)
+
+The follow-up `Screencast_20261003_191333.webm` established that interpolation
+isolation alone did not resolve the reported shaking. Consecutive native
+framebuffer captures showed a repeating three-frame pattern in the blue
+button edges even with a stationary model transform. The translator rounded
+float matrix replacements to 16.16, whereas `guMtxF2L` truncates toward zero.
+For example, the HUD orthographic X scale 0.00625 becomes 409 natively but
+410 with rounding. Alternating original and interpolated draws therefore
+changed the button's horizontal projection and texture sampling.
+
+Replacement matrix conversion now truncates identically to native conversion.
+A regression test checks positive and negative fractional fixed-point units.
+No projection-scope experiment or temporary matrix diagnostics remain.
+A bounded desktop Vulkan run at 60 FPS captured 62 consecutive frames in
+`graphics-43/button-quantization.*.ppm`. Opaque blue button pixels were
+pixel-identical across the entire sequence (maximum RGB difference zero),
+compared with a maximum channel difference of 17 before the conversion fix.
+The surrounding crop's mean consecutive-frame difference dropped from
+0.282 to 0.036; its remaining differences include animated scenery.
+
+The Linux/Clang build and all three RT64 tests, including the Vulkan smoke
+test, pass. Build log: `rt64-hud-quantization-build-final.log`.
+
+## Pause capture with unmodified Plume (2026-10-03)
+
+Full-resolution pause capture now reuses RT64's existing `fbWriteColor` compute
+shader. It samples the resolved display texture at one source pixel per output
+pixel, writes RGBA32 into a formatted GPU buffer, and copies that buffer into
+CPU-readable memory through Plume's existing buffer-copy API. Shader output is
+already RGBA byte order, so the capture no longer requires texture readback,
+row-pitch padding, or a separate CPU conversion for 16-bit channels. The
+existing persistent framebuffer snapshots and native game RAM readback remain
+in place. No new shader or RT64 shader-library change was necessary.
+
+All three RT64 tests passed before reverting Plume. The single temporary
+`plume_vulkan.cpp` modification was then reverted to the recorded revision.
+A fresh Linux/Clang build and all three tests, including the Vulkan smoke test,
+passed again against unmodified Plume. Its worktree and parent submodule diff
+are clean. Logs: `rt64-compute-capture-build.log`,
+`rt64-compute-capture-ctest.log`, `rt64-stock-plume-build.log`, and
+`rt64-stock-plume-ctest.log` under `build/linux-clang-rt64`.
+
+A bounded desktop Vulkan game run captured the widescreen pause menu at
+1280x720. Ground, visible background through the menu, and wall samples were
+pixel-identical between two captures one second apart. Evidence:
+`pause-background/compute-pause-1.png` and `compute-pause-2.png`.

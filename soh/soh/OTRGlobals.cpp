@@ -1610,6 +1610,14 @@ extern "C" uint64_t GetUnixTimestamp() {
 }
 
 extern "C" void Graph_StartFrame() {
+#ifdef SHIP_USE_RT64
+    auto rt64Window = std::dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetInstance()->GetWindow());
+    // Static room images and indoor/Market panoramic skyboxes share a
+    // fixed-camera 4:3 composition with the overlaid geometry.
+    rt64Window->SetPrerenderedRoom(gPlayState &&
+        ((gPlayState->roomCtx.curRoom.meshHeader && gPlayState->roomCtx.curRoom.meshHeader->base.type == 1) ||
+         gPlayState->skyboxCtx.unk_140 != 0));
+#endif
 #ifndef __WIIU__
     using Ship::KbScancode;
     int32_t dwScancode = OTRGlobals::Instance->context->GetWindow()->GetLastScancode();
@@ -2224,6 +2232,11 @@ extern "C" float OTRGetDimensionFromRightEdge(float v) {
 
 // Gets the width of the current render target area
 extern "C" uint32_t OTRGetGameRenderWidth() {
+#ifdef SHIP_USE_RT64
+    // Framebuffer effects address the native RDRAM image, independently of
+    // RT64's GPU resolution and the GUI's output dimensions.
+    return SCREEN_WIDTH;
+#endif
     auto fastWnd = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetInstance()->GetWindow());
     auto intP = fastWnd->GetInterpreterWeak().lock();
 
@@ -2240,6 +2253,9 @@ extern "C" uint32_t OTRGetGameRenderWidth() {
 
 // Gets the height of the current render target area
 extern "C" uint32_t OTRGetGameRenderHeight() {
+#ifdef SHIP_USE_RT64
+    return SCREEN_HEIGHT;
+#endif
     auto fastWnd = dynamic_pointer_cast<Fast::Fast3dWindow>(Ship::Context::GetInstance()->GetWindow());
     auto intP = fastWnd->GetInterpreterWeak().lock();
 

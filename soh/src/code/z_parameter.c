@@ -10,6 +10,7 @@
 #include "soh/Enhancements/cosmetics/cosmeticsTypes.h"
 #include "soh/Enhancements/enhancementTypes.h"
 #include "soh/ShipUtils.h"
+#include "soh/frame_interpolation.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -4947,6 +4948,8 @@ void Interface_DrawActionButton(PlayState* play, f32 x, f32 y) {
 
     OPEN_DISPS(play->state.gfxCtx);
 
+    // Keep the HUD transform's history independent of world draw order.
+    FrameInterpolation_RecordOpenChild("HUD action button", 0);
     Matrix_Translate(-137.0f + x, 97.0f - y, XREG(18) / 10.0f, MTXMODE_NEW);
     Matrix_Scale(1.0f, 1.0f, 1.0f, MTXMODE_APPLY);
     Matrix_RotateX(interfaceCtx->unk_1F4 / 10000.0f, MTXMODE_APPLY);
@@ -4960,6 +4963,7 @@ void Interface_DrawActionButton(PlayState* play, f32 x, f32 y) {
 
     gSP1Quadrangle(OVERLAY_DISP++, 0, 2, 3, 1, 0);
 
+    FrameInterpolation_RecordCloseChild();
     CLOSE_DISPS(play->state.gfxCtx);
 }
 
@@ -5726,6 +5730,7 @@ void Interface_Draw(PlayState* play) {
                           PRIMITIVE, ENVIRONMENT, TEXEL0, ENVIRONMENT, TEXEL0, 0, PRIMITIVE, 0);
         gDPSetPrimColor(OVERLAY_DISP++, 0, 0, 255, 255, 255, interfaceCtx->aAlpha);
         gDPSetEnvColor(OVERLAY_DISP++, 0, 0, 0, 0);
+        FrameInterpolation_RecordOpenChild("HUD action label", 0);
         Matrix_Translate(-138.0f + rAIconX, rAIconY, WREG(46 + languageOffset) / 10.0f, MTXMODE_NEW);
         Matrix_Scale(1.0f, 1.0f, 1.0f, MTXMODE_APPLY);
         Matrix_RotateX(interfaceCtx->unk_1F4 / 10000.0f, MTXMODE_APPLY);
@@ -5737,6 +5742,7 @@ void Interface_Draw(PlayState* play) {
         } else {
             Interface_DrawActionLabel(play->state.gfxCtx, interfaceCtx->doActionSegment[1]);
         }
+        FrameInterpolation_RecordCloseChild();
 
         gDPPipeSync(OVERLAY_DISP++);
 

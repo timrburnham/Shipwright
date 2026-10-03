@@ -294,6 +294,8 @@ void TestNativeMatrixAndFloatReplacement() {
     MtxF replacement{};
     replacement.mf[0][0] = 1.5f;
     replacement.mf[1][2] = -2.25f;
+    replacement.mf[2][0] = 0.00625f; // HUD orthographic X scale: fractional fixed-point unit.
+    replacement.mf[2][1] = -0.00625f;
     replacement.mf[3][3] = 1.0f;
     Gfx replacementCommands[2]{};
     gSPMatrix(&replacementCommands[0], &sourceMatrix, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
@@ -312,6 +314,9 @@ void TestNativeMatrixAndFloatReplacement() {
     Require(fixedReplacement.intPart[1][3] == static_cast<uint16_t>(-3) &&
                 fixedReplacement.fracPart[1][3] == 0xc000,
             "negative float matrix replacement did not convert to paired-column signed 16.16 fixed point");
+    Require(fixedReplacement.intPart[2][1] == 0 && fixedReplacement.fracPart[2][1] == 409 &&
+                fixedReplacement.intPart[2][0] == 0xffff && fixedReplacement.fracPart[2][0] == 0xfe67,
+            "replacement matrices must truncate toward zero exactly like native guMtxF2L");
 }
 
 void TestViewportPacking() {
@@ -416,39 +421,88 @@ void TestBranchStopsCurrentList() {
 void TestWideRectangleLowering() {
     Gfx wideTextureCommands[4]{};
     Gfx* wideTextureCursor = wideTextureCommands;
-    gSPWideTextureRectangle(wideTextureCursor++, 12, 20, 80, 96, 3, 0x1112, 0x1314, 0x1516, 0x1718);
+    gSPWideTextureRectangle(wideTextureCursor++, -5000, 20, 40000, 96, 3, 0x1112, 0x1314, 0x1516, 0x1718);
     gSPEndDisplayList(wideTextureCursor);
-    Gfx standardTextureCommands[] = {gsSPTextureRectangle(12, 20, 80, 96, 3, 0x1112, 0x1314, 0x1516, 0x1718)};
 
     Fast::DisplayListTranslator textureTranslator;
     const uint32_t textureRoot = textureTranslator.Translate(wideTextureCommands);
-    for (size_t i = 0; i < 3; ++i) {
-        const RtCommand actual = ReadCommand(textureTranslator, textureRoot, i);
-        const RtCommand expected = {static_cast<uint32_t>(standardTextureCommands[i].words.w0),
-                                    static_cast<uint32_t>(standardTextureCommands[i].words.w1)};
-        Require(actual.w0 == expected.w0 && actual.w1 == expected.w1,
-                "wide texture rectangle packet did not become the equivalent standard RDP packet");
-    }
-    Require((ReadCommand(textureTranslator, textureRoot, 3).w0 >> 24) ==
+    const RtCommand textureCommand = ReadCommand(textureTranslator, textureRoot, 0);
+    Require((textureCommand.w0 >> 24) == Fast::DisplayListTranslator::NativeWideRectangleOpcode &&
+                textureCommand.w1 == 0,
+            "wide texture rectangle did not use its native-coordinate sidecar command");
+    const auto& textureRectangles = textureTranslator.GetNativeWideRectangles();
+    Require(textureRectangles.size() == 1 && !textureRectangles[0].fill &&
+                textureRectangles[0].ulx == -5000 && textureRectangles[0].uly == 20 &&
+                textureRectangles[0].lrx == 40000 && textureRectangles[0].lry == 96 &&
+                textureRectangles[0].tile == 3 && textureRectangles[0].uls == 0x1112 &&
+                textureRectangles[0].ult == 0x1314 && textureRectangles[0].dsdx == 0x1516 &&
+                textureRectangles[0].dtdy == 0x1718,
+            "wide texture rectangle sidecar lost signed coordinates or texture parameters");
+    Require((ReadCommand(textureTranslator, textureRoot, 1).w0 >> 24) ==
                 static_cast<uint8_t>(Fast::RDP_G_RDPFULLSYNC),
             "wide texture rectangle payload was not consumed before display-list termination");
 
     Gfx wideFillCommands[3]{};
     Gfx* wideFillCursor = wideFillCommands;
-    gDPFillWideRectangle(wideFillCursor++, 3, 4, 20, 30);
+    gDPFillWideRectangle(wideFillCursor++, 1200, 4, 2000, 30);
     gSPEndDisplayList(wideFillCursor);
-    Gfx standardFillCommands[] = {gsDPFillRectangle(3, 4, 20, 30)};
 
     Fast::DisplayListTranslator fillTranslator;
     const uint32_t fillRoot = fillTranslator.Translate(wideFillCommands);
     const RtCommand actualFill = ReadCommand(fillTranslator, fillRoot, 0);
-    const RtCommand expectedFill = {static_cast<uint32_t>(standardFillCommands[0].words.w0),
-                                    static_cast<uint32_t>(standardFillCommands[0].words.w1)};
-    Require(actualFill.w0 == expectedFill.w0 && actualFill.w1 == expectedFill.w1,
-            "wide fill rectangle did not become the equivalent standard RDP fill command");
-    Require((ReadCommand(fillTranslator, fillRoot, 2).w0 >> 24) ==
-                static_cast<uint8_t>(Fast::F3DEX2_G_ENDDL),
+    Require((actualFill.w0 >> 24) == Fast::DisplayListTranslator::NativeWideRectangleOpcode &&
+                actualFill.w1 == 0,
+            "wide fill rectangle did not use its native-coordinate sidecar command");
+    const auto& fillRectangles = fillTranslator.GetNativeWideRectangles();
+    Require(fillRectangles.size() == 1 && fillRectangles[0].fill &&
+                fillRectangles[0].ulx == 1200 * 4 && fillRectangles[0].uly == 4 * 4 &&
+                fillRectangles[0].lrx == 2000 * 4 && fillRectangles[0].lry == 30 * 4,
+            "wide fill rectangle sidecar lost coordinates outside the standard RDP range");
+    Require((ReadCommand(fillTranslator, fillRoot, 1).w0 >> 24) ==
+                static_cast<uint8_t>(Fast::RDP_G_RDPFULLSYNC) &&
+                (ReadCommand(fillTranslator, fillRoot, 2).w0 >> 24) ==
+                    static_cast<uint8_t>(Fast::F3DEX2_G_ENDDL),
             "wide fill payload was not consumed before display-list termination");
+}
+
+void TestLoadBlockDxtUsesRoundedRenderLine() {
+    constexpr uint32_t width = 46;
+    constexpr uint32_t height = 16;
+    Gfx commands[8]{};
+    gDPSetTextureImage(&commands[0], G_IM_FMT_IA, G_IM_SIZ_8b_LOAD_BLOCK, 1,
+                       reinterpret_cast<void*>(static_cast<uintptr_t>(0x1000)));
+    gDPSetTile(&commands[1], G_IM_FMT_IA, G_IM_SIZ_8b_LOAD_BLOCK, 0, 0, G_TX_LOADTILE, 0,
+               G_TX_WRAP, G_TX_NOMASK, G_TX_NOLOD, G_TX_WRAP, G_TX_NOMASK, G_TX_NOLOD);
+    gDPLoadSync(&commands[2]);
+    gDPLoadBlock(&commands[3], G_TX_LOADTILE, 0, 0,
+                 (((width * height) + G_IM_SIZ_8b_INCR) >> G_IM_SIZ_8b_SHIFT) - 1,
+                 CALC_DXT(width, G_IM_SIZ_8b_BYTES));
+    gDPPipeSync(&commands[4]);
+    gDPSetTile(&commands[5], G_IM_FMT_IA, G_IM_SIZ_8b,
+               ((width * G_IM_SIZ_8b_LINE_BYTES) + 7) >> 3, 0, G_TX_RENDERTILE, 0,
+               G_TX_WRAP, G_TX_NOMASK, G_TX_NOLOD, G_TX_WRAP, G_TX_NOMASK, G_TX_NOLOD);
+    gDPSetTileSize(&commands[6], G_TX_RENDERTILE, 0, 0, (width - 1) << G_TEXTURE_IMAGE_FRAC,
+                   (height - 1) << G_TEXTURE_IMAGE_FRAC);
+    gSPEndDisplayList(&commands[7]);
+
+    Fast::DisplayListTranslator translator;
+    const uint32_t root = translator.Translate(commands);
+    const RtCommand loadBlock = ReadCommand(translator, root, 3);
+    const uint32_t originalDxt = CALC_DXT(width, G_IM_SIZ_8b_BYTES);
+    const uint32_t roundedLineWords = ((width * G_IM_SIZ_8b_LINE_BYTES) + 7) >> 3;
+    const uint32_t expectedDxt = ((1u << G_TX_DXT_FRAC) + roundedLineWords - 1) / roundedLineWords;
+    Require((loadBlock.w0 >> 24) == static_cast<uint8_t>(Fast::RDP_G_LOADBLOCK) &&
+                (loadBlock.w1 & 0xfffu) == expectedDxt && originalDxt != expectedDxt,
+            "standard texture-block DXT did not match the rounded render-tile line");
+
+    Gfx manualCommands[3]{};
+    gDPLoadBlock(&manualCommands[0], G_TX_LOADTILE, 0, 0, 367, originalDxt);
+    gSPEndDisplayList(&manualCommands[1]);
+    Fast::DisplayListTranslator manualTranslator;
+    const uint32_t manualRoot = manualTranslator.Translate(manualCommands);
+    const RtCommand manualLoadBlock = ReadCommand(manualTranslator, manualRoot, 0);
+    Require((manualLoadBlock.w1 & 0xfffu) == originalDxt,
+            "manual LOADBLOCK without a render-tile pattern had its DXT modified");
 }
 
 void TestOtrTriangleLowering() {
@@ -544,6 +598,26 @@ void TestFramebufferRegistryAndImageRectStrips() {
         Require((loadTile.w0 >> 24) == static_cast<uint8_t>(Fast::RDP_G_LOADTILE),
                 "G_IMAGERECT strip did not emit a matching texture-memory load");
     }
+
+    Gfx negativeImageRectCommands[5]{};
+    Fast::DisplayListTranslator::DefineFramebuffer(1, 320, 240);
+    Gfx* negativeCursor = negativeImageRectCommands;
+    gDPSetTextureImageFB(negativeCursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320,
+                         reinterpret_cast<void*>(static_cast<uintptr_t>(1)));
+    gDPImageRectangle(negativeCursor++, -16 * 4, 0, 0, 0, 320 * 4, 240 * 4, 320, 240,
+                      G_TX_RENDERTILE, 320, 240);
+    gSPEndDisplayList(negativeCursor);
+    Fast::DisplayListTranslator negativeTranslator;
+    const uint32_t negativeRoot = negativeTranslator.Translate(negativeImageRectCommands);
+    const auto& negativeRectangles = negativeTranslator.GetNativeWideRectangles();
+    Require(!negativeRectangles.empty() && negativeRectangles[0].ulx == -64 &&
+                negativeRectangles[0].uly == 0 && negativeRectangles[0].lrx == 1280 &&
+                negativeRectangles[0].lry == 960 && negativeRectangles[0].tile == G_TX_RENDERTILE,
+            "negative widescreen G_IMAGERECT destination was not preserved in the native-wide sidecar");
+    const RtCommand firstWideImageRect = ReadCommand(negativeTranslator, negativeRoot, 4);
+    Require((firstWideImageRect.w0 >> 24) == Fast::DisplayListTranslator::NativeWideRectangleOpcode &&
+                firstWideImageRect.w1 == 0,
+            "out-of-range G_IMAGERECT strip did not select native-wide rectangle lowering");
 
     Gfx directBindCommands[3]{};
     gDPSetTextureImageFB(&directBindCommands[0], G_IM_FMT_RGBA, G_IM_SIZ_16b, 64,
@@ -828,6 +902,7 @@ int main() {
         run("nested calls and branches", TestNestedCallsAndBranches);
         run("branch terminates current list", TestBranchStopsCurrentList);
         run("wide rectangles", TestWideRectangleLowering);
+        run("load-block DXT uses rounded render line", TestLoadBlockDxtUsesRoundedRenderLine);
         run("OTR triangle", TestOtrTriangleLowering);
         run("compatibility metadata", TestCompatibilityMetadata);
         run("framebuffer registry and image rectangles", TestFramebufferRegistryAndImageRectStrips);

@@ -122,8 +122,17 @@ void FB_DrawFromFramebuffer(Gfx** gfxp, s32 fb, u8 alpha) {
 
     gDPSetEnvColor(gfx++, 255, 255, 255, alpha);
 
+    u32 framebufferDither = G_AD_NOISE | G_CD_NOISE;
+#ifdef SHIP_USE_RT64
+    // The pause image already contains the captured frame's dithering. Adding
+    // fresh random dithering to every redraw makes the frozen scene shimmer.
+    if (fb == gPauseFrameBuffer) {
+        framebufferDither = G_AD_DISABLE | G_CD_DISABLE;
+    }
+#endif
+
     gDPSetOtherMode(gfx++,
-                    G_AD_NOISE | G_CD_NOISE | G_CK_NONE | G_TC_FILT | G_TF_POINT | G_TT_NONE | G_TL_TILE | G_TD_CLAMP |
+                    framebufferDither | G_CK_NONE | G_TC_FILT | G_TF_POINT | G_TT_NONE | G_TL_TILE | G_TD_CLAMP |
                         G_TP_NONE | G_CYC_1CYCLE | G_PM_NPRIMITIVE,
                     G_AC_NONE | G_ZS_PRIM | G_RM_CLD_SURF | G_RM_CLD_SURF2);
 
