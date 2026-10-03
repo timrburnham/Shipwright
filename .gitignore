@@ -460,3 +460,6 @@ soh/properties.h
 /clang-format
 /clang-format.exe
 *.o2r
+
+# Local RT64 shader cache and debug log
+.rt64/

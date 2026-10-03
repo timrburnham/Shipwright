@@ -158,6 +158,7 @@ set(GFX_DEBUG_DISASSEMBLER ON)
 # Tell LUS we're using F3DEX_GBI_2 (in a way that doesn't break libgfxd)
 set(GBI_UCODE F3DEX_GBI_2)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
+include(CTest)
 
 # Enable MPQ and OTR support
 set(INCLUDE_MPQ_SUPPORT ON)
@@ -173,9 +174,25 @@ add_compile_definitions(CONTROLLERBUTTONS_T=uint32_t)
 add_subdirectory(libultraship ${CMAKE_BINARY_DIR}/libultraship)
 target_compile_options(libultraship PRIVATE "${WARNING_OVERRIDE}")
 target_compile_definitions(libultraship PUBLIC INCLUDE_MPQ_SUPPORT)
+
+# RT64 is built as a static library and expects to receive an SDL-created
+# Vulkan window on Linux. Keep it in the build graph next to LUS so consumers
+# of libultraship inherit RT64's headers and link dependency.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(CMake/rt64-linux.cmake)
+endif()
+
 add_subdirectory(ZAPDTR/ZAPD ${CMAKE_BINARY_DIR}/ZAPD)
 add_subdirectory(OTRExporter)
 add_subdirectory(soh)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    get_target_property(_soh_compile_definitions soh COMPILE_DEFINITIONS)
+    if(_soh_compile_definitions)
+        list(REMOVE_ITEM _soh_compile_definitions ENABLE_OPENGL)
+        set_property(TARGET soh PROPERTY COMPILE_DEFINITIONS "${_soh_compile_definitions}")
+    endif()
+endif()
 
 set_property(TARGET soh PROPERTY APPIMAGE_DESKTOP_FILE_TERMINAL YES)
 set_property(TARGET soh PROPERTY APPIMAGE_DESKTOP_FILE "${CMAKE_SOURCE_DIR}/scripts/linux/appimage/soh.desktop")

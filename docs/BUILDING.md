@@ -93,7 +93,7 @@ C:\Program Files\CMake\bin\cmake.exe --build build-cmake --target ExtractAssetHe
 apt-get install gcc g++ git cmake ninja-build lsb-release libsdl2-dev libpng-dev libsdl2-net-dev libzip-dev zipcmp zipmerge ziptool nlohmann-json3-dev libtinyxml2-dev libspdlog-dev libopengl-dev libopusfile-dev libvorbis-dev
 
 # or using clang
-apt-get install clang git cmake ninja-build lsb-release libsdl2-dev libpng-dev libsdl2-net-dev libzip-dev zipcmp zipmerge ziptool nlohmann-json3-dev libtinyxml2-dev libspdlog-dev libopengl-dev libopusfile-dev libvorbis-dev
+apt-get install clang git cmake ninja-build lsb-release libsdl2-dev libdbus-1-dev libpng-dev libsdl2-net-dev libzip-dev zipcmp zipmerge ziptool nlohmann-json3-dev libtinyxml2-dev libspdlog-dev libopengl-dev libopusfile-dev libvorbis-dev
 ```
 #### Arch
 ```sh
@@ -101,7 +101,7 @@ apt-get install clang git cmake ninja-build lsb-release libsdl2-dev libpng-dev l
 pacman -S gcc git cmake ninja lsb-release sdl2 libpng libzip nlohmann-json tinyxml2 spdlog sdl2_net opusfile libvorbis
 
 # or using clang
-pacman -S clang git cmake ninja lsb-release sdl2 libpng libzip nlohmann-json tinyxml2 spdlog sdl2_net opusfile libvorbis
+pacman -S clang git cmake ninja lsb-release sdl2 dbus libpng libzip nlohmann-json tinyxml2 spdlog sdl2_net opusfile libvorbis
 ```
 #### Fedora
 ```sh
@@ -109,8 +109,43 @@ pacman -S clang git cmake ninja lsb-release sdl2 libpng libzip nlohmann-json tin
 dnf install gcc gcc-c++ git cmake ninja-build lsb_release SDL2-devel libpng-devel libzip-devel libzip-tools nlohmann-json-devel tinyxml2-devel spdlog-devel opusfile-devel libvorbis-devel
 
 # or using clang
-dnf install clang git cmake ninja-build lsb_release SDL2-devel libpng-devel libzip-devel libzip-tools nlohmann-json-devel tinyxml2-devel spdlog-devel opusfile-devel libvorbis-devel
+dnf install clang git cmake ninja-build lsb_release SDL2-devel dbus-devel libpng-devel libzip-devel libzip-tools nlohmann-json-devel tinyxml2-devel spdlog-devel opusfile-devel libvorbis-devel
 ```
+
+### Linux Clang build with RT64
+The `linux-clang-rt64` CMake preset configures a Ninja Debug build with Clang and RT64's static SDL/Vulkan renderer. Initialize the RT64 submodule along with the other submodules. CMake 3.26 or newer is required.
+
+```sh
+cmake --preset linux-clang-rt64
+cmake --build --preset linux-clang-rt64 --parallel
+cmake --build --preset linux-clang-rt64 --target GenerateSohOtr
+ctest --preset linux-clang-rt64
+```
+
+The preset writes the build to `build/linux-clang-rt64`. `GenerateSohOtr` builds the custom Ship of Harkinian archive used by the app. The CPU translator test runs headlessly; the Vulkan renderer smoke test needs an active desktop session and a working Vulkan device, and reports skipped when no SDL video device is available.
+
+Linux builds omit Fast3D's GPU backends and submit game display lists to RT64. The LUS interpreter object remains for resource, texture registration, and window integration. The bridge translates native pointers, OTR resources, matrix interpolation, F3DEX2/S2DEX2 backgrounds, grayscale effects, and framebuffer operations into RT64's memory and rendering APIs.
+
+The current logical game surface is 320×240 at 4:3; GPU resolution scaling and MSAA operate separately. Custom GLSL shader commands and indexed display-list commands are unsupported. Masks for scaled high-resolution replacement textures remain unsupported; native texture masks and unscaled RGBA replacement masks are supported. Changes inside the `libultraship` and `rt64` submodules must be preserved along with the parent repository changes.
+
+To extract a game archive and continue into the app without the extractor's final confirmation dialog, run from the build's `soh` directory and provide your ROM path:
+
+```sh
+cd build/linux-clang-rt64/soh
+./soh.elf /path/to/ocarina-of-time.z64 --extract-and-run
+```
+
+The renderer smoke test checks native triangle/matrix rendering, decoded depth, grayscale, GUI presentation, and framebuffer copy/read/texture operations, including 2× resolution and 4× MSAA. CPU tests cover command translation and texture masks. These checks do not replace testing a full game session on the target GPU. For a bounded application run, the RT64 runtime accepts these optional environment variables:
+
+```sh
+SHIP_RT64_TEST_FRAMES=120 SHIP_RT64_CAPTURE=frame.ppm \
+  ./soh.elf /path/to/ocarina-of-time.z64 --extract-and-run
+```
+
+`SHIP_RT64_TEST_FRAMES` requests shutdown after the specified number of rendered game frames. If `SHIP_RT64_CAPTURE` is set, the runtime writes the native 320×240 output as a PPM image at that frame. Run from the `build/linux-clang-rt64/soh` directory so the generated archives are found.
+
+For reproducible input during a bounded run, `SHIP_RT64_TEST_KEY` accepts an SDL scancode name (for example `Space` for the default Start mapping or `F1` for the menu). `SHIP_RT64_TEST_KEY_FRAME` selects the rendered frame to press it, defaulting to 60; it is released six rendered frames later so game input can sample it when interpolation is enabled. For several presses, `SHIP_RT64_TEST_KEYS` accepts a comma-separated schedule such as `60:Space,240:Z`, which opens pause and then the equipment page with the default keyboard mappings. Each scheduled key is released six rendered frames later. These input options only operate when `SHIP_RT64_TEST_FRAMES` is set.
+
 #### Nix
 You can use a `flake.nix` file to instantly setup a development environment using [Nix](https://nixos.org/). Write this `flake.nix` file in the root directory:
 
@@ -143,6 +178,7 @@ You can use a `flake.nix` file to instantly setup a development environment usin
             SDL2
             SDL2.dev
             SDL2_net
+            dbus.dev
 
             # Other libraries
             libpng

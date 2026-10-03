@@ -1,0 +1,49 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 26,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "linux-clang-rt64",
+      "displayName": "Linux Clang with RT64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-clang-rt64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "RT64_STATIC": "ON",
+        "RT64_SDL_WINDOW_VULKAN": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-clang-rt64",
+      "configurePreset": "linux-clang-rt64"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-clang-rt64",
+      "configurePreset": "linux-clang-rt64",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "name": "^rt64_"
+        }
+      }
+    }
+  ]
+}

@@ -406,6 +406,11 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
             args.push_back(argv[i]);
         }
     }
+    // Explicit CLI continuation lets automated renderer validation extract a
+    // supplied ROM and proceed without the final "Run SoH?" dialog.
+    const auto continuation = std::find(args.begin(), args.end(), "--extract-and-run");
+    const bool extractAndRun = continuation != args.end();
+    if (extractAndRun) args.erase(continuation);
     Extractor extract;
     PromptSteps promptStep = PS_FILE_CHECK;
     bool generatedIsMQ = false;
@@ -559,6 +564,10 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
             case ES_EXTRACT_ARGS: {
 #if !defined(__SWITCH__) && !defined(__WIIU__)
                 if (args.empty()) {
+                    if (extractAndRun) {
+                        extractStep = ES_VERIFY;
+                        continue;
+                    }
                     SohGui::RegisterPopup(
                         "Run Ship of Harkinian", "All files have been processed. Run SoH?", "Yes", "No",
                         [&]() {
