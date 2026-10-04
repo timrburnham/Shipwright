@@ -1,5 +1,7 @@
 #include <libultraship/bridge.h>
 #include <string>
+#include <cstring>
+#include <fast/resource/type/DisplayList.h>
 #include "soh/OTRGlobals.h"
 #include "soh/cvar_prefixes.h"
 #include "soh/ResourceManagerHelpers.h"
@@ -11,6 +13,8 @@ extern "C" {
 #include "objects/object_gi_soldout/object_gi_soldout.h"
 #include "objects/object_ik/object_ik.h"
 #include "objects/object_link_child/object_link_child.h"
+#include "objects/object_fish/object_fish.h"
+#include "objects/object_zo/object_zo.h"
 }
 
 typedef struct {
@@ -90,7 +94,11 @@ void PatchArrowTipTexture() {
                              G_TX_MIRROR | G_TX_WRAP, 5, 5, 1, 1),
     };
 
-    bool fixTexturesOOB = CVarGetInteger(CVAR_ENHANCEMENT("FixTexturesOOB"), 0);
+    // Some ROM archives omit the overflow texture. Use the complete,
+    // correctly sized load in those archives instead of patching in a missing
+    // resource. Keep the authentic overflow appearance when it is available.
+    bool fixTexturesOOB = CVarGetInteger(CVAR_ENHANCEMENT("FixTexturesOOB"), 0) ||
+                          ResourceMgr_GetResourceByNameHandlingMQ(gHilite2Tex_Overflow) == nullptr;
 
     for (const auto& patchInfo : arrowTipDListPatchInfos) {
         const char* dlist = patchInfo.dlist;
@@ -99,7 +107,7 @@ void PatchArrowTipTexture() {
         // Patch using custom overflowed texture
         if (!fixTexturesOOB) {
             // Unpatch the other texture fix
-            for (size_t i = 4; i < 8; i++) {
+            for (size_t i = 0; i < 8; i++) {
                 int instruction = start + i;
                 std::string unpatchName = "arrowTipTextureWithSizeFix_" + std::to_string(instruction);
                 ResourceMgr_UnpatchGfxByName(dlist, unpatchName.c_str());
@@ -116,15 +124,17 @@ void PatchArrowTipTexture() {
             ResourceMgr_UnpatchGfxByName(dlist, unpatchName.c_str());
             ResourceMgr_UnpatchGfxByName(dlist, unpatchName2.c_str());
 
-            for (size_t i = 4; i < 8; i++) {
+            for (size_t i = 0; i < 8; i++) {
                 int instruction = start + i;
                 std::string patchName = "arrowTipTextureWithSizeFix_" + std::to_string(instruction);
 
-                if (i == 0) {
+                // The original OTR texture-image command occupies two slots;
+                // the native replacement occupies one.
+                if (i == 1) {
                     ResourceMgr_PatchGfxByName(dlist, patchName.c_str(), instruction, gsSPNoOp());
                 } else {
                     ResourceMgr_PatchGfxByName(dlist, patchName.c_str(), instruction,
-                                               arrowTipTextureWithSizeFixGfx[i - 1]);
+                                               arrowTipTextureWithSizeFixGfx[i == 0 ? 0 : i - 1]);
                 }
             }
         }
@@ -291,6 +301,46 @@ void PatchBoulderFragment() {
                                gsDPSetCombineMode(G_CC_MODULATEIDECALA, G_CC_MODULATEIA_PRIM2));
 }
 
+static void PatchRippleVertices(const char* modelDL, const char* patchName) {
+    // Some exports fail to resolve these models' cross-object vertex loads,
+    // leaving a zero-count hash command with the triangle as its payload.
+    // Both original ripple models share their four vertices with the shockwave effect.
+    auto ripple = std::dynamic_pointer_cast<Fast::DisplayList>(
+        ResourceMgr_GetResourceByNameHandlingMQ(modelDL));
+    auto shockwave = std::dynamic_pointer_cast<Fast::DisplayList>(
+        ResourceMgr_GetResourceByNameHandlingMQ(gEffShockwaveDL));
+    if (!ripple || !shockwave || ripple->GetInitData()->IsCustom || shockwave->GetInitData()->IsCustom ||
+        ripple->Instructions.size() != 5 || shockwave->Instructions.size() < 18) {
+        return;
+    }
+    const auto& broken = ripple->Instructions[2];
+    const auto& load = shockwave->Instructions[14];
+    if (broken.words.w0 != (G_VTX_OTR_HASH << 24) || broken.words.w1 != 0 ||
+        ripple->Instructions[3].words.w0 != 0x06000204 || ripple->Instructions[3].words.w1 != 0x00020604 ||
+        (load.words.w0 & 0xFFFFFFFFu) != ((G_VTX_OTR_HASH << 24) | 0x4008) || load.words.w1 != 0) {
+        return;
+    }
+    const auto& payload = shockwave->Instructions[15];
+    const uint64_t hash = (uint64_t(payload.words.w0) << 32) | uint32_t(payload.words.w1);
+    auto vertices = Ship::Context::GetInstance()->GetResourceManager()->LoadResource(hash);
+    if (!vertices || vertices->GetRawPointer() == nullptr || vertices->GetPointerSize() < sizeof(Vtx) * 4) {
+        return;
+    }
+    // Own the copy so resource cache eviction cannot invalidate the patch.
+    static Vtx rippleVertices[4];
+    std::memcpy(rippleVertices, vertices->GetRawPointer(), sizeof(rippleVertices));
+    ResourceMgr_PatchGfxByName(modelDL, patchName, 2,
+                               gsSPVertex(rippleVertices, 4, 0));
+}
+
+static void PatchFishingRippleVertices() {
+    PatchRippleVertices(gFishingRippleModelDL, "fishingRippleVertices");
+}
+
+static void PatchZoraRippleVertices() {
+    PatchRippleVertices(gZoraRipplesModelDL, "zoraRippleVertices");
+}
+
 void ApplyAuthenticGfxPatches() {
     // Overflow textures
     PatchArrowTipTexture();
@@ -299,6 +349,8 @@ void ApplyAuthenticGfxPatches() {
     PatchIronKnuckleTextureOverflow();
 
     PatchBoulderFragment();
+    PatchFishingRippleVertices();
+    PatchZoraRippleVertices();
 }
 
 // Patches the Sold Out GI DL to render the texture in the mirror boundary

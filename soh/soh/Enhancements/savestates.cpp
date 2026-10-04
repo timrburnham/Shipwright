@@ -1,4 +1,5 @@
 #include "savestates.h"
+#include "soh/Enhancements/Graphics/LakeWater/LakeWater.h"
 
 #include <soh/GameVersions.h>
 
@@ -952,4 +953,13 @@ void SaveState::Load(void) {
     LoadOnePointDemoData();
     LoadOverlayStaticData();
     LoadMiscCodeData();
+
+    // Host-owned wave buffers are outside the copied Zelda heap. Rebuild from
+    // the cartridge's initial phase after every restore, in either time direction.
+    // Queries and drawing use the flat fallback until the new field is published.
+    if (gPlayState != nullptr && gPlayState->sceneNum == SCENE_LAKE_HYLIA) {
+        LakeWater_Initialize(gPlayState);
+    } else {
+        LakeWater_Destroy(gPlayState);
+    }
 }

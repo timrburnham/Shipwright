@@ -538,6 +538,15 @@ void SohMenu::AddMenuEnhancements() {
     AddSidebarEntry("Enhancements", path.sidebarName, 3);
     path.column = SECTION_COLUMN_1;
 
+    AddWidget(path, "Water", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Wave Race Original Lake Water", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("WaveRaceLakeWater"))
+        .Options(CheckboxOptions()
+                     .DefaultValue(true)
+                     .Tooltip("Uses the Original Wave Race water surface in Lake Hylia when its cartridge data and "
+                              "renderer are ready. Otherwise Lake Hylia keeps Zelda's original water and contact "
+                              "behavior."));
+
     AddWidget(path, "Mods", WIDGET_SEPARATOR_TEXT);
     AddWidget(path, "Disable Bomb Billboarding", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("DisableBombBillboarding"))

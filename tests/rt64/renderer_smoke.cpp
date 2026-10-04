@@ -18,6 +18,7 @@
 #include <SDL.h>
 #include <cmath>
 #include "common/rt64_math.h"
+#include "soh/Enhancements/Graphics/LakeWater/CartridgeWaterAssets.h"
 
 namespace {
 bool VerifyAxisAlignedProjection() {
@@ -142,6 +143,7 @@ bool VerifyWideFramebufferCopy(Fast::Rt64Renderer& renderer) {
     gDPSetCycleType(cursor++, G_CYC_1CYCLE);
     gDPSetRenderMode(cursor++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
     gDPSetTextureFilter(cursor++, G_TF_POINT);
+    gDPSetTexturePersp(cursor++, G_TP_NONE);
     gDPSetCombineMode(cursor++, G_CC_DECALRGBA, G_CC_DECALRGBA);
     gDPSetTextureImageFB(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320,
                          reinterpret_cast<void*>(static_cast<uintptr_t>(2)));
@@ -719,6 +721,253 @@ bool VerifyNativeTriangle(Fast::Rt64Renderer& renderer, bool perspective = false
     return inside == 0xF801 && outside == 0x003F && std::abs(static_cast<int>(depth) - 32766) < 256;
 }
 
+// Exercise the cartridge one-player water's texture/combiner/blend policy.
+// The synthetic constant texture avoids depending on redistributed ROM assets.
+bool VerifyCartridgeWaterState(Fast::Rt64Renderer& renderer, bool fog = false) {
+    MtxS identity{};
+    for (size_t i = 0; i < 4; ++i) identity.intPart[i][i ^ 1u] = 1;
+    MtxS projection{};
+    projection.fracPart[0][1] = 655;
+    projection.fracPart[1][0] = 655;
+    projection.intPart[2][3] = 1;
+    projection.intPart[3][2] = 1;
+    Vp viewport{};
+    viewport.vp.vscale[0] = viewport.vp.vtrans[0] = 640;
+    viewport.vp.vscale[1] = viewport.vp.vtrans[1] = 480;
+    viewport.vp.vscale[2] = viewport.vp.vtrans[2] = 511;
+    std::array<uint8_t, 32 * 32 * 4> texture{};
+    for (size_t i = 0; i < texture.size(); i += 4) {
+        texture[i] = 255;
+        texture[i + 3] = 128;
+    }
+    std::array<Fast::F3DVtx, 3> vertices{};
+    vertices[0].v.ob[0] = -60;
+    vertices[0].v.ob[1] = -50;
+    vertices[1].v.ob[0] = 60;
+    vertices[1].v.ob[1] = -50;
+    vertices[2].v.ob[1] = 60;
+    for (auto& vertex : vertices) {
+        vertex.v.tc[0] = vertex.v.tc[1] = 1024;
+        for (auto& channel : vertex.v.cn) channel = 255;
+    }
+    Gfx commands[64]{};
+    Gfx* cursor = commands;
+    gDPPipeSync(cursor++);
+    gDPSetDepthImage(cursor++, reinterpret_cast<void*>(static_cast<uintptr_t>(Fast::DisplayListTranslator::DepthAddress)));
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::DepthAddress);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetFillColor(cursor++, 0xfffcfffcU);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    gDPFullSync(cursor++);
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
+    gDPSetFillColor(cursor++, 0x003f003fU);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    gDPPipeSync(cursor++);
+    gSPClearGeometryMode(cursor++, G_CULL_BOTH | G_FOG | G_LIGHTING | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR |
+                                  G_SHADING_SMOOTH);
+    gSPSetGeometryMode(cursor++, G_ZBUFFER | G_SHADE);
+    gDPLoadTextureBlock(cursor++, texture.data(), G_IM_FMT_RGBA, G_IM_SIZ_32b, 32, 32, 0,
+                       G_TX_NOMIRROR | G_TX_CLAMP, G_TX_NOMIRROR | G_TX_CLAMP,
+                       G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+    gSPTexture(cursor++, 0x8000, 0x8000, 0, G_TX_RENDERTILE, G_ON);
+    gDPSetCycleType(cursor++, G_CYC_1CYCLE);
+    gDPSetRenderMode(cursor++, G_RM_AA_ZB_XLU_SURF, G_RM_AA_ZB_XLU_SURF2);
+    gDPSetCombineMode(cursor++, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    if (fog) {
+        // Drake Lake's cartridge path fogs the decal in cycle two. A constant
+        // full fog factor makes the expected source color unambiguous.
+        gSPSetGeometryMode(cursor++, G_FOG | G_SHADING_SMOOTH);
+        gDPSetCycleType(cursor++, G_CYC_2CYCLE);
+        gDPSetRenderMode(cursor++, G_RM_FOG_SHADE_A, G_RM_AA_ZB_XLU_SURF2);
+        gDPSetCombineMode(cursor++, G_CC_DECALRGBA, G_CC_PASS2);
+        gDPSetFogColor(cursor++, 0, 255, 0, 255);
+        gSPFogFactor(cursor++, 0, 32767);
+    }
+    // DECALRGBA uses texel color/alpha, so this unrelated env color must not tint it.
+    gDPSetEnvColor(cursor++, 0, 255, 0, 17);
+    gDPSetTexturePersp(cursor++, G_TP_PERSP);
+    gDPSetTextureFilter(cursor++, G_TF_BILERP);
+    gSPViewport(cursor++, &viewport);
+    gSPMatrix(cursor++, &projection, G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPMatrix(cursor++, &identity, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    __gSPVertex(cursor++, vertices.data(), 3, 0);
+    gSP1Triangle(cursor++, 0, 1, 2, 0);
+    if (fog) {
+        gSPClearGeometryMode(cursor++, G_FOG | G_SHADING_SMOOTH);
+        gSPFogFactor(cursor++, 0, 0);
+    }
+    gDPFullSync(cursor++);
+    gSPEndDisplayList(cursor);
+    renderer.Run(commands, {});
+    renderer.Present();
+    const uint16_t pixel = renderer.GetNativeColor(160, 120);
+    const int red = (pixel >> 11) & 31;
+    const int green = (pixel >> 6) & 31;
+    const int blue = (pixel >> 1) & 31;
+    const bool sourceColor = fog ? (red <= 2 && green >= 12 && green <= 20) :
+                                  (red >= 12 && red <= 20 && green <= 2);
+    return sourceColor && blue >= 12 && blue <= 20 &&
+           renderer.GetNativeColor(20, 20) == 0x003f && renderer.GetDepth(160, 120) == 0xfffc;
+}
+
+// Check Sunny Beach's ROM-derived cyan body plane underneath a small
+// cyan-to-white decal map. This exercises the Original shade-combined
+// underlay and texture-highlight material without redistributing the ROM.
+bool VerifySunnyBeachWaterMaterial(Fast::Rt64Renderer& renderer) {
+    MtxS identity{};
+    for (size_t i = 0; i < 4; ++i) identity.intPart[i][i ^ 1u] = 1;
+    MtxS projection{};
+    projection.fracPart[0][1] = 655;
+    projection.fracPart[1][0] = 655;
+    projection.intPart[2][3] = 1;
+    projection.intPart[3][2] = 1;
+    Vp viewport{};
+    viewport.vp.vscale[0] = viewport.vp.vtrans[0] = 640;
+    viewport.vp.vscale[1] = viewport.vp.vtrans[1] = 480;
+    viewport.vp.vscale[2] = viewport.vp.vtrans[2] = 511;
+    std::array<u8, 32 * 32 * 4> texture{};
+    for (int y = 0; y < 32; ++y) {
+        for (int x = 0; x < 32; ++x) {
+            const bool crest = (x >= 22 && x <= 25 && y >= 14 && y <= 17);
+            const u8 r = crest ? 255 : 0;
+            const u8 g = crest ? 255 : 190;
+            const u8 b = crest ? 255 : 220;
+            const u8 a = crest ? 192 : 128;
+            const size_t offset = (y * 32 + x) * 4;
+            texture[offset + 0] = r;
+            texture[offset + 1] = g;
+            texture[offset + 2] = b;
+            texture[offset + 3] = a;
+        }
+    }
+    std::array<Fast::F3DVtx, 6> vertices{};
+    const std::array<std::array<s16, 2>, 6> positions{{
+        {{-60, -50}}, {{0, -50}}, {{-30, 50}}, {{0, -50}}, {{60, -50}}, {{30, 50}}
+    }};
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        vertices[i].v.ob[0] = positions[i][0];
+        vertices[i].v.ob[1] = positions[i][1];
+        const bool crestTriangle = i >= 3;
+        vertices[i].v.tc[0] = crestTriangle ? 24 * 64 : 16 * 64;
+        vertices[i].v.tc[1] = 16 * 64;
+        for (auto& channel : vertices[i].v.cn) channel = 255;
+    }
+    std::array<Fast::F3DVtx, 4> bodyVertices{};
+    const std::array<std::array<s16, 2>, 4> bodyPositions{{
+        {{-80, -80}}, {{80, -80}}, {{80, 80}}, {{-80, 80}}
+    }};
+    for (size_t i = 0; i < bodyVertices.size(); ++i) {
+        bodyVertices[i].v.ob[0] = bodyPositions[i][0];
+        bodyVertices[i].v.ob[1] = bodyPositions[i][1];
+        // Keep the test plane inside the orthographic clip volume and behind
+        // the textured highlights; the production body Y is a world-space
+        // height, not this fixture's camera-space depth.
+        bodyVertices[i].v.ob[2] = 1;
+        bodyVertices[i].v.cn[0] = LAKE_WATER_WR64_BODY_R;
+        bodyVertices[i].v.cn[1] = LAKE_WATER_WR64_BODY_G;
+        bodyVertices[i].v.cn[2] = LAKE_WATER_WR64_BODY_B;
+        bodyVertices[i].v.cn[3] = 255;
+    }
+    Gfx commands[96]{};
+    Gfx* cursor = commands;
+    gDPSetDepthImage(cursor++, reinterpret_cast<void*>(static_cast<uintptr_t>(Fast::DisplayListTranslator::DepthAddress)));
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::DepthAddress);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(cursor++, 0xfffcfffcU);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    gDPFullSync(cursor++);
+    gDPSetColorImage(cursor++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
+    gDPSetScissor(cursor++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetCycleType(cursor++, G_CYC_FILL);
+    gDPSetRenderMode(cursor++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(cursor++, 0x003f003fU);
+    gDPFillRectangle(cursor++, 0, 0, 319, 239);
+    gDPPipeSync(cursor++);
+    cursor = LakeWater_EmitOriginalSunnyBeachBodyMaterial(cursor);
+    gDPSetTexturePersp(cursor++, G_TP_NONE);
+    gSPViewport(cursor++, &viewport);
+    gSPMatrix(cursor++, &projection, G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPMatrix(cursor++, &identity, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    __gSPVertex(cursor++, bodyVertices.data(), 4, 0);
+    gSP1Triangle(cursor++, 0, 1, 2, 0);
+    gSP1Triangle(cursor++, 0, 2, 3, 0);
+    cursor = LakeWater_EmitOriginalSunnyBeachMaterial(cursor, reinterpret_cast<const u32*>(texture.data()), 255, 176);
+    gDPSetTexturePersp(cursor++, G_TP_PERSP);
+    gDPSetTextureFilter(cursor++, G_TF_POINT);
+    gSPViewport(cursor++, &viewport);
+    gSPMatrix(cursor++, &projection, G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPMatrix(cursor++, &identity, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    __gSPVertex(cursor++, vertices.data(), 6, 0);
+    gSP1Triangle(cursor++, 0, 1, 2, 0);
+    gSP1Triangle(cursor++, 3, 4, 5, 0);
+    gDPFullSync(cursor++);
+    gSPEndDisplayList(cursor);
+
+    renderer.Run(commands, {});
+    renderer.Present();
+    const uint16_t center = renderer.GetNativeColor(112, 120);
+    const uint16_t crest = renderer.GetNativeColor(208, 120);
+    const uint16_t body = renderer.GetNativeColor(160, 55);
+    const uint16_t outside = renderer.GetNativeColor(20, 20);
+    const auto channels = [](uint16_t pixel) {
+        return std::array<int, 3>{(pixel >> 11) & 31, (pixel >> 6) & 31, (pixel >> 1) & 31};
+    };
+    const auto water = channels(center);
+    const auto white = channels(crest);
+    const auto bodyRgb = channels(body);
+    const bool originalPasses = outside == 0x003f && bodyRgb[0] <= 2 && bodyRgb[1] >= 20 && bodyRgb[2] >= 18 &&
+                                water[0] <= 3 && water[1] >= 8 && water[2] >= 12 &&
+                                white[0] >= 10 && white[1] > water[1] && white[2] > water[2] &&
+                                renderer.GetDepth(160, 55) != 0xfffc &&
+                                renderer.GetDepth(112, 120) != 0xfffc && renderer.GetDepth(208, 120) != 0xfffc;
+
+    // Compare the fused output against the two-pass Original body + decal
+    // result. The fused pass preserves the color while leaving depth at clear.
+    Gfx compositeCommands[96]{};
+    Gfx* composite = compositeCommands;
+    gDPSetDepthImage(composite++, reinterpret_cast<void*>(static_cast<uintptr_t>(Fast::DisplayListTranslator::DepthAddress)));
+    gDPSetColorImage(composite++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::DepthAddress);
+    gDPSetCycleType(composite++, G_CYC_FILL);
+    gDPSetRenderMode(composite++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(composite++, 0xfffcfffcU);
+    gDPFillRectangle(composite++, 0, 0, 319, 239);
+    gDPFullSync(composite++);
+    gDPSetColorImage(composite++, G_IM_FMT_RGBA, G_IM_SIZ_16b, 320, Fast::DisplayListTranslator::ColorAddress);
+    gDPSetScissor(composite++, G_SC_NON_INTERLACE, 0, 0, 320, 240);
+    gDPSetCycleType(composite++, G_CYC_FILL);
+    gDPSetRenderMode(composite++, G_RM_NOOP, G_RM_NOOP2);
+    gDPSetFillColor(composite++, 0x003f003fU);
+    gDPFillRectangle(composite++, 0, 0, 319, 239);
+    gDPPipeSync(composite++);
+    composite = LakeWater_EmitOriginalSunnyBeachCompositeMaterial(
+        composite, reinterpret_cast<const u32*>(texture.data()));
+    gDPSetTexturePersp(composite++, G_TP_PERSP);
+    gDPSetTextureFilter(composite++, G_TF_POINT);
+    gSPViewport(composite++, &viewport);
+    gSPMatrix(composite++, &projection, G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+    gSPMatrix(composite++, &identity, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
+    __gSPVertex(composite++, vertices.data(), 6, 0);
+    gSP1Triangle(composite++, 0, 1, 2, 0);
+    gSP1Triangle(composite++, 3, 4, 5, 0);
+    gDPFullSync(composite++);
+    gSPEndDisplayList(composite);
+    renderer.Run(compositeCommands, {});
+    renderer.Present();
+    const uint16_t fusedCenter = renderer.GetNativeColor(112, 120);
+    const uint16_t fusedCrest = renderer.GetNativeColor(208, 120);
+    const auto fusedWater = channels(fusedCenter);
+    const auto fusedWhite = channels(fusedCrest);
+    const auto closeChannel = [](int a, int b) { return std::abs(a - b) <= 1; };
+    const bool fusedMatches = closeChannel(fusedWater[0], water[0]) && closeChannel(fusedWater[1], water[1]) &&
+                              closeChannel(fusedWater[2], water[2]) && closeChannel(fusedWhite[0], white[0]) &&
+                              closeChannel(fusedWhite[1], white[1]) && closeChannel(fusedWhite[2], white[2]);
+    return originalPasses && fusedMatches && renderer.GetNativeColor(20, 20) == 0x003f &&
+           renderer.GetDepth(112, 120) == 0xfffc && renderer.GetDepth(208, 120) == 0xfffc;
+}
+
 bool VerifyWideEdgeRectangle(Fast::Rt64Renderer& renderer) {
     Gfx commands[16]{};
     Gfx* cursor = commands;
@@ -886,6 +1135,24 @@ int main() {
             std::cerr << "RT64 HUD IA8 texture-perspective/alpha-edge regression failed: none=0x"
                       << std::hex << renderer.GetNativeColor(112, 120) << " persp=0x"
                       << renderer.GetNativeColor(208, 120) << std::dec << '\n';
+            return 1;
+        }
+        // Translucent water followed by a smaller wide framebuffer exercises
+        // capture cropping when RT64 retains a larger render-target allocation.
+        if (!VerifyCartridgeWaterState(renderer) || !VerifyCartridgeWaterState(renderer, true)) {
+            std::cerr << "RT64 Original water color/fog/translucency/depth policy failed: pixel=0x"
+                      << std::hex << renderer.GetNativeColor(160, 120) << " depth=0x"
+                      << renderer.GetDepth(160, 120) << std::dec << '\n';
+            return 1;
+        }
+        if (!VerifySunnyBeachWaterMaterial(renderer)) {
+            std::cerr << "RT64 Sunny Beach one-cycle cyan/crest decal material failed: body=0x"
+                      << std::hex << renderer.GetNativeColor(160, 55) << " center=0x"
+                      << renderer.GetNativeColor(112, 120) << " crest=0x"
+                      << renderer.GetNativeColor(208, 120) << " outside=0x" << renderer.GetNativeColor(20, 20)
+                      << " depthBody=0x" << renderer.GetDepth(160, 55) << " depthCenter=0x"
+                      << renderer.GetDepth(112, 120) << " depthCrest=0x" << renderer.GetDepth(208, 120)
+                      << std::dec << '\n';
             return 1;
         }
         renderer.SetRenderSize(426, 240);

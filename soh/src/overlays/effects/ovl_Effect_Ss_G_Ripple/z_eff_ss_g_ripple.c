@@ -6,6 +6,7 @@
 
 #include "z_eff_ss_g_ripple.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
+#include "soh/Enhancements/Graphics/LakeWater/LakeWater.h"
 
 #define rWaterBoxNum regs[0]
 #define rRadius regs[1]
@@ -76,7 +77,11 @@ void EffectSsGRipple_DrawRipple(PlayState* play, EffectSs* this, void* segment) 
     radius = this->rRadius * 0.0025f;
 
     if ((this->rWaterBoxNum != -1) && (this->rWaterBoxNum < play->colCtx.colHeader->numWaterBoxes)) {
-        yPos = (this->rWaterBoxNum + play->colCtx.colHeader->waterBoxes)->ySurface;
+        WaterBox* waterBox = this->rWaterBoxNum + play->colCtx.colHeader->waterBoxes;
+        yPos = waterBox->ySurface;
+        if (play->sceneNum == SCENE_LAKE_HYLIA) {
+            LakeWater_Sample(play, waterBox, this->pos.x, this->pos.z, &yPos);
+        }
     } else {
         yPos = this->pos.y;
     }

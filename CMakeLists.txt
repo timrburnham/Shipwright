@@ -182,9 +182,39 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     include(CMake/rt64-linux.cmake)
 endif()
 
+# Dense cartridge water also exercises the interpreter in Debug builds.
+# Keep symbols and strict floating-point behavior while optimizing only the
+# display-list hot paths; the rest of the game remains normally debuggable.
+if(TARGET rt64 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        "${CMAKE_SOURCE_DIR}/rt64/src/hle/rt64_rsp.cpp"
+        "${CMAKE_SOURCE_DIR}/rt64/src/hle/rt64_interpreter.cpp"
+        "${CMAKE_SOURCE_DIR}/rt64/src/gbi/rt64_gbi_f3dex2.cpp"
+        TARGET_DIRECTORY rt64
+        PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;$<$<CONFIG:Debug>:-fno-fast-math>;$<$<CONFIG:Debug>:-ffp-contract=off>")
+    set_source_files_properties(
+        "${CMAKE_SOURCE_DIR}/libultraship/src/fast/rt64/DisplayListTranslator.cpp"
+        TARGET_DIRECTORY libultraship
+        PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;$<$<CONFIG:Debug>:-fno-fast-math>;$<$<CONFIG:Debug>:-ffp-contract=off>")
+endif()
+
 add_subdirectory(ZAPDTR/ZAPD ${CMAKE_BINARY_DIR}/ZAPD)
 add_subdirectory(OTRExporter)
 add_subdirectory(soh)
+
+# Cartridge formulas depend on the original float operation boundaries and
+# finite-input checks. Release's global fast-math must not rewrite this port.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        "${CMAKE_SOURCE_DIR}/soh/soh/Enhancements/Graphics/LakeWater/WaveField.cpp"
+        "${CMAKE_SOURCE_DIR}/soh/soh/Enhancements/Graphics/LakeWater/CartridgeWaveSource.cpp"
+        "${CMAKE_SOURCE_DIR}/soh/soh/Enhancements/Graphics/LakeWater/CartridgeWaterRenderer.cpp"
+        "${CMAKE_SOURCE_DIR}/soh/soh/Enhancements/Graphics/LakeWater/LakeDomain.cpp"
+        "${CMAKE_SOURCE_DIR}/soh/soh/Enhancements/Graphics/LakeWater/ShoreProfile.cpp"
+        "${CMAKE_SOURCE_DIR}/soh/soh/Enhancements/Graphics/LakeWater/LakeWaterSimulation.cpp"
+        TARGET_DIRECTORY soh
+        PROPERTIES COMPILE_OPTIONS "-O2;-fno-fast-math;-ffp-contract=off")
+endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     get_target_property(_soh_compile_definitions soh COMPILE_DEFINITIONS)
@@ -211,6 +241,55 @@ install(DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/xml/" DESTINATION ./assets/xml
 endif()
 
 find_package(Python3 COMPONENTS Interpreter)
+
+# Cartridge data is generated locally from the user's ROM, never source assets.
+set(WR64_WATER_ROM "" CACHE FILEPATH "Wave Race 64 USA Rev A big-endian ROM for original water extraction")
+set(WR64_WATER_ASSET_DIR "${CMAKE_SOURCE_DIR}/build/cartridge-water" CACHE PATH
+    "Local generated Wave Race cartridge water cache")
+set(_wr64_water_texture "${WR64_WATER_ASSET_DIR}/drake_lake_water_32x32.rgba")
+set(_wr64_sunny_texture "${WR64_WATER_ASSET_DIR}/sunny_beach_water_32x32.rgba")
+set(_wr64_water_manifest "${WR64_WATER_ASSET_DIR}/water_manifest.json")
+set(_wr64_sunny_body_dl "${WR64_WATER_ASSET_DIR}/sunny_beach_body.gfx.bin")
+set(_wr64_sunny_body_vertices "${WR64_WATER_ASSET_DIR}/sunny_beach_body.vtx.bin")
+set(_wr64_sunny_source "${WR64_WATER_ASSET_DIR}/sunny_beach_wave_sources.bin")
+set(_wr64_wave_source "${WR64_WATER_ASSET_DIR}/drake_lake_wave_source.bin")
+if(WR64_WATER_ROM)
+    if(NOT Python3_Interpreter_FOUND)
+        message(FATAL_ERROR "WR64_WATER_ROM requires Python 3 for local asset extraction")
+    endif()
+    add_custom_command(OUTPUT "${_wr64_sunny_body_dl}" "${_wr64_sunny_body_vertices}" "${_wr64_sunny_source}" "${_wr64_sunny_texture}" "${_wr64_water_texture}" "${_wr64_water_manifest}" "${_wr64_wave_source}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/extract_wr64_cartridge_water.py"
+            "${WR64_WATER_ROM}" --out "${WR64_WATER_ASSET_DIR}"
+        DEPENDS "${WR64_WATER_ROM}" "${CMAKE_SOURCE_DIR}/tools/extract_wr64_cartridge_water.py"
+            "${CMAKE_SOURCE_DIR}/tools/verify_wr64_water.py"
+        COMMENT "Extracting original Wave Race water assets from local ROM"
+        VERBATIM)
+endif()
+if(WR64_WATER_ROM OR (EXISTS "${_wr64_sunny_source}" AND EXISTS "${_wr64_sunny_texture}" AND EXISTS "${_wr64_water_texture}" AND EXISTS "${_wr64_water_manifest}" AND EXISTS "${_wr64_wave_source}"))
+    add_custom_target(StageWaveRaceWater
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:soh>/cartridge-water"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_wr64_sunny_source}"
+            "$<TARGET_FILE_DIR:soh>/cartridge-water/sunny_beach_wave_sources.bin"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_wr64_sunny_texture}"
+            "$<TARGET_FILE_DIR:soh>/cartridge-water/sunny_beach_water_32x32.rgba"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_wr64_water_texture}"
+            "$<TARGET_FILE_DIR:soh>/cartridge-water/drake_lake_water_32x32.rgba"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_wr64_water_manifest}"
+            "$<TARGET_FILE_DIR:soh>/cartridge-water/water_manifest.json"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_wr64_wave_source}"
+            "$<TARGET_FILE_DIR:soh>/cartridge-water/drake_lake_wave_source.bin"
+        DEPENDS "${_wr64_sunny_source}" "${_wr64_sunny_texture}" "${_wr64_water_texture}" "${_wr64_water_manifest}" "${_wr64_wave_source}"
+        VERBATIM)
+    add_dependencies(soh StageWaveRaceWater)
+endif()
+
+if(BUILD_TESTING AND TARGET rt64_wave_field_trace AND WR64_WATER_ROM AND Python3_Interpreter_FOUND)
+    add_test(NAME rt64_cartridge_water_parity COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_SOURCE_DIR}/tools/verify_wr64_water.py" "${WR64_WATER_ROM}"
+        --port $<TARGET_FILE:rt64_wave_field_trace>
+        --out "${CMAKE_BINARY_DIR}/cartridge-water/reference.json")
+    set_tests_properties(rt64_cartridge_water_parity PROPERTIES TIMEOUT 240)
+endif()
 
 # Target to generate OTRs
 add_custom_target(

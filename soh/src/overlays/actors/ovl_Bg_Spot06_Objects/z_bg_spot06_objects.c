@@ -8,6 +8,7 @@
 #include "objects/object_spot06_objects/object_spot06_objects.h"
 #include "soh/Enhancements/custom-message/CustomMessageTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/Graphics/LakeWater/LakeWater.h"
 
 #define FLAGS ACTOR_FLAG_HOOKSHOT_PULLS_ACTOR
 
@@ -154,6 +155,7 @@ void BgSpot06Objects_Init(Actor* thisx, PlayState* play) {
             thisx->colChkInfo.mass = MASS_IMMOVABLE;
             break;
         case LHO_WATER_PLANE:
+            LakeWater_Initialize(play);
             Actor_ProcessInitChain(thisx, sInitChainWaterPlane);
             thisx->flags = ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
 
@@ -179,6 +181,9 @@ void BgSpot06Objects_Init(Actor* thisx, PlayState* play) {
                 water_boxes[LHWB_MAIN_2].ySurface = WATER_LEVEL_RAISED;
                 this->actionFunc = BgSpot06Objects_DoNothing;
             }
+            LakeWater_SetRenderState(play,
+                                     (this->lakeHyliaWaterLevel < -680.0f) && (gSaveContext.sceneSetupIndex < 4),
+                                     thisx->world.pos.x, thisx->world.pos.z);
             break;
         case LHO_ICE_BLOCK:
             Actor_ProcessInitChain(thisx, sInitChain);
@@ -212,6 +217,7 @@ void BgSpot06Objects_Destroy(Actor* thisx, PlayState* play) {
             Collider_DestroyJntSph(play, &this->collider);
             break;
         case LHO_WATER_PLANE:
+            LakeWater_Destroy(play);
             break;
     }
 
@@ -447,6 +453,12 @@ void BgSpot06Objects_Update(Actor* thisx, PlayState* play) {
 
     this->actionFunc(this, play);
 
+    if (thisx->params == LHO_WATER_PLANE) {
+        LakeWater_SetRenderState(play, (this->lakeHyliaWaterLevel < -680.0f) &&
+                                            (gSaveContext.sceneSetupIndex < 4),
+                                 thisx->world.pos.x, thisx->world.pos.z);
+    }
+
     if (thisx->params == LHO_WATER_TEMPLE_ENTRANCE_LOCK) {
         CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
     }
@@ -524,28 +536,33 @@ void BgSpot06Objects_Update(Actor* thisx, PlayState* play) {
 void BgSpot06Objects_DrawLakeHyliaWater(BgSpot06Objects* this, PlayState* play) {
     s32 pad;
     s32 gameplayFrames;
+    s32 lowWater = (this->lakeHyliaWaterLevel < -680.0f) && (gSaveContext.sceneSetupIndex < 4);
 
     OPEN_DISPS(play->state.gfxCtx);
 
-    Gfx_SetupDL_25Xlu(play->state.gfxCtx);
+    if (!LakeWater_Draw(play, play->colCtx.colHeader->waterBoxes[LHWB_MAIN_1].ySurface, lowWater,
+                       this->dyna.actor.world.pos.x, this->dyna.actor.world.pos.z, &POLY_XLU_DISP)) {
+        Gfx_SetupDL_25Xlu(play->state.gfxCtx);
 
-    gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+        gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
 
-    gameplayFrames = play->state.frames;
+        gameplayFrames = play->state.frames;
 
-    gSPSegment(POLY_XLU_DISP++, 0x08,
-               Gfx_TwoTexScrollEx(play->state.gfxCtx, 0, -gameplayFrames, gameplayFrames, 32, 32, 1, gameplayFrames,
-                                  gameplayFrames, 32, 32, -1, 1, 1, 1));
-    gSPSegment(POLY_XLU_DISP++, 0x09,
-               Gfx_TwoTexScrollEx(play->state.gfxCtx, 0, -gameplayFrames, gameplayFrames * 6, 32, 32, 1, gameplayFrames,
-                                  gameplayFrames * 6, 32, 32, -1, 6, 1, 6));
+        gSPSegment(POLY_XLU_DISP++, 0x08,
+                   Gfx_TwoTexScrollEx(play->state.gfxCtx, 0, -gameplayFrames, gameplayFrames, 32, 32, 1, gameplayFrames,
+                                      gameplayFrames, 32, 32, -1, 1, 1, 1));
+        gSPSegment(POLY_XLU_DISP++, 0x09,
+                   Gfx_TwoTexScrollEx(play->state.gfxCtx, 0, -gameplayFrames, gameplayFrames * 6, 32, 32, 1, gameplayFrames,
+                                      gameplayFrames * 6, 32, 32, -1, 6, 1, 6));
 
-    gDPSetEnvColor(POLY_XLU_DISP++, 255, 255, 255, 128);
+        gDPSetEnvColor(POLY_XLU_DISP++, 255, 255, 255, 128);
 
-    if ((this->lakeHyliaWaterLevel < -680.0f) && (gSaveContext.sceneSetupIndex < 4)) {
-        gSPDisplayList(POLY_XLU_DISP++, gLakeHyliaLowWaterDL);
-    } else {
-        gSPDisplayList(POLY_XLU_DISP++, gLakeHyliaHighWaterDL);
+        if (lowWater) {
+            gSPDisplayList(POLY_XLU_DISP++, gLakeHyliaLowWaterDL);
+        } else {
+            gSPDisplayList(POLY_XLU_DISP++, gLakeHyliaHighWaterDL);
+        }
+
     }
 
     CLOSE_DISPS(play->state.gfxCtx);

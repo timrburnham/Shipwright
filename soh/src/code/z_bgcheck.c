@@ -3,6 +3,7 @@
 
 #include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
+#include "soh/Enhancements/Graphics/LakeWater/LakeWater.h"
 #include <assert.h>
 
 #define SS_NULL 0xFFFF
@@ -4242,6 +4243,9 @@ s32 WaterBox_GetSurfaceImpl(PlayState* play, CollisionContext* colCtx, f32 x, f3
                     if (curWaterBox->zMin < z && z < curWaterBox->zMin + curWaterBox->zLength) {
                         *outWaterBox = curWaterBox;
                         *ySurface = curWaterBox->ySurface;
+                        if (play->sceneNum == SCENE_LAKE_HYLIA) {
+                            LakeWater_Sample(play, curWaterBox, x, z, ySurface);
+                        }
                         return true;
                     }
                 }
@@ -4286,7 +4290,11 @@ s32 WaterBox_GetSurface2(PlayState* play, CollisionContext* colCtx, Vec3f* pos, 
         if (!(waterBox->zMin < pos->z && pos->z < waterBox->zMin + waterBox->zLength)) {
             continue;
         }
-        if (pos->y - surfaceChkDist < waterBox->ySurface && waterBox->ySurface < pos->y + surfaceChkDist) {
+        f32 ySurface = waterBox->ySurface;
+        if (play->sceneNum == SCENE_LAKE_HYLIA) {
+            LakeWater_Sample(play, waterBox, pos->x, pos->z, &ySurface);
+        }
+        if (pos->y - surfaceChkDist < ySurface && ySurface < pos->y + surfaceChkDist) {
             *outWaterBox = waterBox;
             return i;
         }

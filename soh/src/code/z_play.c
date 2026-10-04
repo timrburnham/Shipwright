@@ -9,6 +9,7 @@
 #include <overlays/misc/ovl_kaleido_scope/z_kaleido_scope.h>
 #include "soh/Enhancements/enhancementTypes.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Enhancements/Graphics/LakeWater/LakeWater.h"
 #include "soh/OTRGlobals.h"
 #include "soh/ResourceManagerHelpers.h"
 #include "soh/SaveManager.h"
@@ -1199,6 +1200,10 @@ void Play_Update(PlayState* play) {
                 } else {
                     PLAY_LOG(3606);
                     func_800973FC(play, &play->roomCtx);
+
+                    // Commit wave displacement before actors, effects, and cameras
+                    // query the surface. Pause and freeze frames do not advance it.
+                    LakeWater_Update(play);
 
                     PLAY_LOG(3612);
                     CollisionCheck_AT(play, &play->colChkCtx);

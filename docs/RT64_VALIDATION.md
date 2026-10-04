@@ -262,3 +262,66 @@ A bounded desktop Vulkan game run captured the widescreen pause menu at
 1280x720. Ground, visible background through the menu, and wall samples were
 pixel-identical between two captures one second apart. Evidence:
 `pause-background/compute-pause-1.png` and `compute-pause-2.png`.
+
+## Bow crash with missing overflow texture (2026-10-04)
+
+The reported bow crash dump identifies an uncaught texture-load exception for
+`__OTR__objects/gameplay_keep/gHilite2Tex_Overflow`. The loaded archive lacks
+that asset, but the authentic graphics patch installed it in both near and far
+arrow display lists. Some ROM extraction definitions omit this texture.
+
+The arrow patch now uses a complete, correctly sized 16x16 load of `gHilite2Tex`
+when the overflow resource is unavailable. Archives containing the overflow
+texture still use it with `FixTexturesOOB` disabled. The corrected load replaces
+all eight original command slots, including the two-slot OTR image command;
+switching back to the overflow path restores all eight slots.
+
+The Linux/Clang build and CPU regressions passed, and the Vulkan renderer smoke
+test passed on the desktop GPU. An isolated adult Lake Hylia run completed 900
+frames normally, with five released shots, 35 near-model draws, and 315 far-model
+draws. Saves and settings were isolated from the normal game. Horseback and
+enemy-targeting interactions were not separately replayed.
+
+The manual GDB regression checks successful process exit, multiple released
+shots, and both model distances. From the repository root, with the normal
+keyboard Left-to-C-left mapping and extracted game archives available:
+
+```sh
+python3 tools/capture_lake_water.py --output build/linux-clang-rt64/bow-smoke --age adult --water zelda --prepare-only
+SHIP_HOME="$PWD/build/linux-clang-rt64/bow-smoke" \
+SHIP_RT64_TEST_FRAMES=900 \
+SHIP_RT64_TEST_KEYS='60:Space,180:Left,240:Left,300:Left,360:Left,420:Left,480:Left,540:Left,600:Left' \
+gdb -batch -x tests/rt64/bow_smoke.gdb --args build/linux-clang-rt64/soh/soh.elf
+```
+
+Evidence: `bow-smoke/launch.log`, `rt64-bow-build-final.log`,
+`rt64-bow-ctest.log`, and `rt64-bow-vulkan-ctest.log` under the build directory.
+
+## Fishing Pond ripple vertex repair (2026-10-04)
+
+The reported pond-entry crash is an uncaught vertex-load exception. The archive's
+`gFishingRippleModelDL` contains `0x32000000, 0` in place of its vertex load,
+so the translator reads the following triangle as a nonexistent resource hash.
+The original USA ROM instead loads four vertices from gameplay_keep at
+`0x0401A5C0`, shared with `gEffShockwaveDL`. That vertex resource is already
+present in the archive and correctly referenced by the shockwave display list.
+
+The authentic graphics patches now recognize the exact malformed ripple model
+and replace only its vertex command with a native load of those shared vertices.
+The triangles remain intact, and an owned vertex copy survives resource cache
+eviction. Valid models and custom display lists are excluded from the repair.
+The extracted archive does not need to be replaced.
+
+The Linux/Clang build and all four targeted RT64 renderer/CPU tests passed,
+including the desktop Vulkan smoke test. An isolated adult pond run completed
+360 frames normally and drew the ripple model 666 times. A child pond run also
+completed 360 frames normally, with 831 ripple draws. The manual regression
+in `tests/rt64/fishing_smoke.gdb` checks the pond scene, actual ripple draws, and
+successful process exit. Use isolated debug-warp settings with current scene
+25 (Lake Hylia Buildings), entrance 1 (Fishing Pond), a 360-frame RT64 limit,
+and `SHIP_RT64_TEST_KEYS=60:Space`.
+
+Evidence under the build directory: `fishing-smoke/launch.log`,
+`fishing-smoke/frame.png`, `fishing-child-smoke/launch.log`, `rt64-fishing-build-final.log`, and
+`rt64-fishing-ctest.log`. This verifies entry and ripple rendering; the complete
+fishing minigame has not been played through.
